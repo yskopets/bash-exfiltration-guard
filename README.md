@@ -145,8 +145,30 @@ Three kinds, in decreasing order of confidence:
 - **Variables named like secrets** — `$GITHUB_TOKEN`, `$AWS_SECRET_ACCESS_KEY`.
   Also a heuristic, also labelled.
 
-Transforms do not sanitise. `base64`, `gzip` and `tr` pass a flow straight
-through, so `$(cat ~/.ssh/id_rsa | base64)` is still traced to its sink.
+Transforms do not sanitise. `base64`, `gzip`, `tr` and the standard filters
+(`grep`, `sort`, `sed`, `awk`, `cut`, `uniq`) pass a flow straight through, so
+`$(cat ~/.ssh/id_rsa | grep PRIVATE | base64)` is still traced to its sink.
+
+A few commands are listed as **reducers** — `wc`, `ls`, `[` — whose output does
+not carry their input onward. A flow stops there. This is a deliberate
+fail-open: `printenv GH_TOKEN | wc -c` is a length oracle, a real but far
+weaker leak than the token itself, and reporting it drowns the findings that
+matter.
+
+### Redirection
+
+A redirect is a sink only when it captures **stdout** and the target actually
+stores the data. `2>/dev/null` does neither. Getting this wrong is expensive:
+before the file descriptor was checked, 124 of 148 disk findings across the
+corpus below were `2>/dev/null`.
+
+```
+printenv GH_TOKEN > /tmp/leak     sink      stdout, real file
+printenv GH_TOKEN &> /tmp/leak    sink      &> captures stdout too
+printenv GH_TOKEN 2> /tmp/err     not       stderr, not stdout
+printenv GH_TOKEN 2>/dev/null     not       stderr, and discarded
+printenv GH_TOKEN > /dev/null     not       stdout, but discarded
+```
 
 ### Unknown is not safe
 
@@ -162,6 +184,46 @@ The same rule applies to sinks that take their payload on stdin. `cat
 the finding is recorded against the command itself; a declared sink quietly
 swallowing a flow would be worse than an unknown command.
 
+## Validated against real commands
+
+Run against 129,915 unique bash commands (172,661 invocations) captured from
+Claude Code sessions in CI:
+
+| | |
+|---|---|
+| parsed by mvdan.cc/sh | **99.79%** of unique commands, 99.84% weighted |
+| analyzer panics | **0** |
+
+Of the 269 parse failures, `bash -n` rejects 234 as invalid shell — they are
+truncated in the capture. The remaining 35 break down as:
+
+- **31** are markdown prose with unescaped backticks inside a double-quoted
+  argument (`gh pr review -b "the \`spyMetrics(x)\` type"`). `bash -n` accepts
+  these because it does not parse inside command substitution; real bash
+  fails on them at runtime. mvdan.cc/sh is the stricter and more correct one.
+- **3** are here-documents whose delimiter never appears. Bash accepts these
+  with a warning (`here-document delimited by end-of-file`); mvdan.cc/sh
+  rejects them.
+- **1** is a genuine parser gap: two here-documents sharing a delimiter on one
+  line (`cmd << 'EOF' || cmd2 << 'EOF'`).
+
+The corpus itself is not in this repository, so unlike the parser comparison
+these numbers are not reproducible from a clean checkout.
+
+The corpus is also what drove the redirect, `export` and filter handling
+above. Their effect on the same 129,915 commands:
+
+| | before | after |
+|---|---|---|
+| disk findings | 148 | **19** (124 were `2>/dev/null`) |
+| auth findings | 66 | **84** (chains through `export` now resolve) |
+| "unknown command" notes | 41,711 | **4,881** |
+| unhandled-construct notes | 1,524 | **176** |
+
+What survives is what should: `curl -s -H "Authorization: Bearer $(gh auth
+token)"` as intended use, and `gh auth token > /tmp/ght.txt` as a credential
+written to disk.
+
 ## What this prototype does not do
 
 Stated explicitly, because a security tool that hides its blind spots is worse
@@ -172,6 +234,11 @@ than one that has none.
   variable wins regardless of the branch it was in.
 - **No interprocedural analysis.** Function bodies are analyzed, but a call to
   a function is not linked back to its definition.
+- **Wrapper commands are not unwrapped.** `xargs curl -d`, `timeout 30 curl`
+  and `python3 -c "..."` run another program that the analyzer does not
+  descend into. These are left deliberately unknown so that they are reported
+  rather than cleared — `xargs` alone accounts for 3,225 of the remaining
+  unknown-command notes.
 - **No value computation.** The analyzer knows a word carries a credential; it
   never knows which one, and cannot tell `https://api.github.com` from
   `https://evil.com`. Destination allowlisting would be a separate layer.

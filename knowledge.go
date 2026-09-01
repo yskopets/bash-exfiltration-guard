@@ -1,6 +1,9 @@
 package main
 
-import "regexp"
+import (
+	"regexp"
+	"strings"
+)
 
 // This file is the only place that knows anything about specific programs.
 // The analyzer in analyze.go is generic: it walks the AST and asks this table
@@ -129,6 +132,36 @@ var commands = map[string]*Spec{
 	"xxd":    {PassesStdin: true, ReadsFiles: true},
 	"jq":     {PassesStdin: true, ReadsFiles: true},
 
+	// The standard filter set. These select or reshape their input and emit
+	// the selected data, so a secret survives them -- `cat ~/.ssh/id_rsa |
+	// grep PRIVATE` still carries the key. Without these entries every
+	// pipeline cascades "unknown command" notes and buries the real ones.
+	"grep":  {PassesStdin: true, ReadsFiles: true},
+	"egrep": {PassesStdin: true, ReadsFiles: true},
+	"rg":    {PassesStdin: true, ReadsFiles: true},
+	"sort":  {PassesStdin: true, ReadsFiles: true},
+	"uniq":  {PassesStdin: true, ReadsFiles: true},
+	"cut":   {PassesStdin: true, ReadsFiles: true},
+	"sed":   {PassesStdin: true, ReadsFiles: true},
+	"awk":   {PassesStdin: true, ReadsFiles: true},
+	"comm":  {ReadsFiles: true},
+	"rev":   {PassesStdin: true},
+
+	// Reducers: known commands whose output does not carry their input on.
+	// `wc` turns data into a count, `ls` prints names rather than contents,
+	// and `[` yields only an exit status.
+	//
+	// Listing them stops a flow, which is a deliberate fail-open: a length
+	// or existence oracle (`printenv GH_TOKEN | wc -c`) is a real but much
+	// weaker leak, and treating it as one drowns the report. Side channels
+	// of this kind are out of scope for the prototype.
+	"wc":    {},
+	"ls":    {},
+	"[":     {},
+	"test":  {},
+	"true":  {},
+	"false": {},
+
 	"gh": {Subcommands: map[string]*Spec{
 		"auth": {Subcommands: map[string]*Spec{
 			"token": {Produces: "prints the GitHub CLI's stored OAuth token"},
@@ -253,6 +286,17 @@ func Lookup(name string, args []string) (spec *Spec, consumed int, known bool) {
 		spec, consumed = next, i+1
 	}
 	return spec, consumed, true
+}
+
+// isDiscard reports whether a redirect target throws its input away. Writing
+// a secret to /dev/null is not a leak, and `2>/dev/null` is so common that
+// treating it as one drowns every real finding.
+func isDiscard(target string) bool {
+	switch strings.Trim(target, `"'`) {
+	case "/dev/null", "/dev/zero":
+		return true
+	}
+	return false
 }
 
 // ------------------------------------------------------------ heuristics

