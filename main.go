@@ -1,255 +1,98 @@
 package main
 
-import (
-	"encoding/json"
-	"flag"
-	"fmt"
-	"io"
-	"os"
-	"strings"
-)
-
-// guard maps the flow of security-sensitive data through a bash command and
-// decides whether to allow or deny it.
+// guard decides whether a bash command should be allowed to run, by tracing
+// where security-sensitive data in it comes from and where it ends up.
 //
-//	guard '<command>'
-//	echo '<command>' | guard
-//	guard -json '<command>'
-//	guard -kb ./knowledge.yaml '<command>'
-//	guard -check                          validate a knowledge base and stop
+//	guard assess '<bash command>'    assess one command
+//	guard config check              load and validate a knowledge base
+//	guard serve                     run the HTTP API
 //
-// Exit codes are the interface for a policy gate:
+// Exit codes are the contract for a policy gate:
 //
 //	0  ALLOW
 //	1  DENY   -- including a command that cannot be parsed
 //	2  usage error, or a knowledge base that will not load
 //
-// A broken knowledge base exits 2 rather than 1, so that it can never be
-// mistaken for a denied command.
+// A broken knowledge base exits 2 rather than 1, so it can never be mistaken
+// for a denied command.
 //
-// It is a prototype. It reports what it can trace and says plainly what it
-// cannot, and everything it could not account for is visible in the output
-// rather than folded silently into the verdict.
+// guard never executes anything it is given. It parses the command and walks
+// the syntax tree; that is all it does with the string.
 
-// maxReported caps the per-command coverage listing. Real commands run to
-// tens of kilobytes with dozens of stages; an unbounded listing is least
-// readable exactly where it matters most.
+import (
+	"fmt"
+	"os"
+
+	"github.com/spf13/cobra"
+)
+
+// Exit codes, named so the intent is visible at every call site.
 const (
-	maxCommandsReported = 12
-	maxArgsReported     = 10
+	exitAllow = 0
+	exitDeny  = 1
+	exitUsage = 2
 )
 
 func main() {
-	jsonOut := flag.Bool("json", false, "emit the flow graph, coverage and verdict as JSON")
-	quiet := flag.Bool("q", false, "print nothing; communicate the verdict through the exit code")
-	kbPath := flag.String("kb", "", "knowledge base to use instead of the built-in one")
-	check := flag.Bool("check", false, "validate the knowledge base, print a summary and stop")
-	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "usage: guard [-json] [-q] [-kb FILE] '<bash command>'\n")
-		fmt.Fprintf(os.Stderr, "       guard -check [-kb FILE]\n\n")
-		fmt.Fprintf(os.Stderr, "exit: 0 allow, 1 deny, 2 usage error or unloadable knowledge base\n\n")
-		flag.PrintDefaults()
-	}
-	flag.Parse()
-
-	kb, err := loadKnowledge(*kbPath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "%v\n", err)
-		os.Exit(2)
-	}
-	if *check {
-		fmt.Println(kb.Summary())
-		return
-	}
-
-	src := strings.Join(flag.Args(), " ")
-	if strings.TrimSpace(src) == "" {
-		b, err := io.ReadAll(os.Stdin)
-		if err != nil || strings.TrimSpace(string(b)) == "" {
-			flag.Usage()
-			os.Exit(2)
-		}
-		src = string(b)
-	}
-	src = strings.TrimRight(src, "\n")
-
-	a, err := Analyze(src, kb)
-	if err != nil {
-		// A command that cannot be parsed has unknown data flow, and unknown
-		// is never an allow.
-		if !*quiet {
-			fmt.Fprintf(os.Stderr, "DENY: cannot parse command, so its data flow is unknown:\n  %v\n", err)
-		}
-		os.Exit(1)
-	}
-
-	verdict, reasons := a.Decide()
-
-	switch {
-	case *quiet:
-	case *jsonOut:
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		_ = enc.Encode(map[string]any{
-			"command":        src,
-			"knowledge_base": kb.Source,
-			"verdict":        verdict,
-			"reasons":        reasons,
-			"commands":       a.Uses,
-			"findings":       a.Findings,
-			"notes":          a.Notes,
-		})
-	default:
-		report(os.Stdout, src, a, verdict, reasons)
-	}
-
-	if verdict == Deny {
-		os.Exit(1)
-	}
+	os.Exit(execute())
 }
 
-// loadKnowledge picks the knowledge base: the file named by -kb, or the one
+func execute() int {
+	root, code := newRootCmd()
+	if err := root.Execute(); err != nil {
+		fmt.Fprintln(os.Stderr, "guard:", err)
+		return exitUsage
+	}
+	return *code
+}
+
+// newRootCmd builds the command tree and returns it alongside the exit code
+// the assessment will write into. Split out from run so tests can drive the
+// CLI without touching os.Args or os.Exit.
+func newRootCmd() (*cobra.Command, *int) {
+	var kbPath string
+
+	root := &cobra.Command{
+		Use:   "guard",
+		Short: "Decide whether a bash command may run, by tracing its data flow",
+		Long: "guard traces where security-sensitive data in a bash command comes from\n" +
+			"and where it ends up, then allows or denies the command.\n\n" +
+			"It never executes what it is given: it parses the command and walks the\n" +
+			"syntax tree, and that is all.",
+
+		// A DENY must exit 1 without printing usage. Returning an error from
+		// RunE would make cobra dump the help text and bury the verdict, so
+		// verdicts are communicated by exit code and errors are reserved for
+		// genuine misuse.
+		SilenceUsage:  true,
+		SilenceErrors: true,
+
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return cmd.Help()
+		},
+	}
+
+	// --kb is persistent because every subcommand needs a knowledge base:
+	// assess and serve to decide with, config check to validate.
+	root.PersistentFlags().StringVar(&kbPath, "kb", "",
+		"knowledge base to use instead of the built-in one")
+
+	code := exitAllow
+	root.AddCommand(
+		newAssessCmd(&kbPath, &code),
+		newConfigCmd(&kbPath),
+		newServeCmd(&kbPath),
+	)
+	return root, &code
+}
+
+// loadKnowledge picks the knowledge base: the file named by --kb, or the one
 // compiled into the binary. There is no merging -- the base that loads is the
-// whole policy.
+// whole policy, so "which knowledge base produced this verdict" has exactly
+// one answer.
 func loadKnowledge(path string) (*KnowledgeBase, error) {
 	if path != "" {
 		return LoadKnowledgeFile(path)
 	}
 	return LoadBuiltinKnowledge()
-}
-
-func report(w io.Writer, src string, a *Analyzer, verdict Verdict, reasons []string) {
-	fmt.Fprintf(w, "command\n  %s\n\n", src)
-	reportCoverage(w, a)
-	reportFlows(w, src, a)
-
-	if len(a.Notes) > 0 {
-		fmt.Fprintf(w, "not traced\n")
-		for _, n := range a.Notes {
-			fmt.Fprintf(w, "  - %s\n      %s\n", n.Text, place(src, n.Span))
-		}
-		fmt.Fprintln(w)
-	}
-
-	fmt.Fprintf(w, "verdict\n  %s\n", verdict)
-	fmt.Fprintf(w, "    (knowledge base: %s)\n", a.kb.Source)
-	for _, r := range reasons {
-		fmt.Fprintf(w, "    - %s\n", r)
-	}
-	if verdict == Allow && hasAuthFinding(a) {
-		fmt.Fprintf(w, "  caveat: destination hosts are not modelled, so a credential sent to an\n"+
-			"          untrusted host is indistinguishable from one sent to a trusted host.\n")
-	}
-}
-
-// reportCoverage answers the question the verdict rests on: which parts of
-// this command does the knowledge base actually account for?
-func reportCoverage(w io.Writer, a *Analyzer) {
-	fmt.Fprintf(w, "commands\n")
-	if len(a.Uses) == 0 {
-		fmt.Fprintf(w, "  (none)\n\n")
-		return
-	}
-	for i, u := range a.Uses {
-		if i == maxCommandsReported {
-			fmt.Fprintf(w, "  ... and %d more\n", len(a.Uses)-i)
-			break
-		}
-		fmt.Fprintf(w, "  [%d] %-38s %s\n", i+1, truncate(u.Name, 38), coverageLabel(u))
-		for j, arg := range u.Args {
-			if j == maxArgsReported {
-				fmt.Fprintf(w, "        ... and %d more arguments\n", len(u.Args)-j)
-				break
-			}
-			mark := " "
-			if !arg.Known {
-				mark = "!"
-			}
-			slot := ""
-			if arg.Slot != "" {
-				slot = "-> " + arg.Slot + " slot"
-			}
-			fmt.Fprintf(w, "      %s %-32s %-22s %s\n", mark, truncate(arg.Text, 32), arg.Role, slot)
-		}
-		fmt.Fprintf(w, "      %s\n", dataLabel(u))
-	}
-	fmt.Fprintln(w)
-}
-
-func coverageLabel(u CommandUse) string {
-	switch {
-	case u.Computed != "":
-		return "FORBIDDEN: name from " + u.Computed
-	case !u.Known:
-		return "NOT IN KNOWLEDGE BASE"
-	case u.UntrustedPath != "":
-		return "UNTRUSTED PATH: " + u.UntrustedPath
-	case len(u.Gaps) > 0:
-		return "UNKNOWN FLAGS: " + strings.Join(u.Gaps, " ")
-	}
-	return "fully understood"
-}
-
-func dataLabel(u CommandUse) string {
-	parts := []string{}
-	if u.Receives {
-		parts = append(parts, "receives sensitive data")
-	} else {
-		parts = append(parts, "no sensitive data enters here")
-	}
-	if u.Emits != "" {
-		parts = append(parts, "emits to "+u.Emits)
-	}
-	return strings.Join(parts, ", ")
-}
-
-func reportFlows(w io.Writer, src string, a *Analyzer) {
-	if len(a.Findings) == 0 {
-		fmt.Fprintf(w, "data flow\n  no sensitive data reached a command that emits it\n\n")
-		return
-	}
-	fmt.Fprintf(w, "data flow\n")
-	for i, f := range a.Findings {
-		fmt.Fprintf(w, "  [%d] %s\n", i+1, f.Flow.Origin)
-		fmt.Fprintf(w, "      %s\n", f.Flow.Why)
-		fmt.Fprintf(w, "      %s\n", place(src, f.Flow.Span))
-		for _, s := range f.Flow.Steps {
-			fmt.Fprintf(w, "        -> %-46s %s\n", s.Desc, place(src, s.Span))
-		}
-		label := "INTENDED USE"
-		switch {
-		case f.Unresolved:
-			label = "UNKNOWN DATA"
-		case exposingSlot(f.Slot):
-			label = "EXPOSED"
-		}
-		fmt.Fprintf(w, "      %s: reaches %s\n", label, f.Emits)
-		fmt.Fprintf(w, "      %s slot -- %s\n\n", f.Slot, f.Slot.Desc())
-	}
-}
-
-func hasAuthFinding(a *Analyzer) bool {
-	for _, f := range a.Findings {
-		if f.Slot == SlotAuth && !f.Unresolved {
-			return true
-		}
-	}
-	return false
-}
-
-func truncate(s string, n int) string {
-	s = strings.ReplaceAll(s, "\n", " ")
-	if len(s) <= n {
-		return s
-	}
-	return s[:n-3] + "..."
-}
-
-// place renders a span as the source text it covers plus its byte offsets, so
-// every line of the report can be checked against the original command.
-func place(src string, s Span) string {
-	if int(s.End) > len(src) || s.Start > s.End {
-		return fmt.Sprintf("(%s)", s)
-	}
-	return fmt.Sprintf("`%s` (%s)", truncate(src[s.Start:s.End], 46), s)
 }

@@ -287,9 +287,23 @@ func slotNames() string {
 // base is going to be the main way this tool grows, so it needs a way to say
 // "this file loaded, and here is what it contains".
 func (kb *KnowledgeBase) Summary() string {
-	var commands, subcommands, flags, switches int
-	var count func(s *Spec)
-	count = func(s *Spec) {
+	commands, subcommands, flags, switches := kb.counts()
+	return fmt.Sprintf(
+		"knowledge base %s\n  %d commands, %d subcommands\n  %d value-taking flags, %d switches\n  %d trusted program dirs, %d discard targets",
+		kb.Source, commands, subcommands, flags, switches,
+		len(kb.TrustedProgramDirs), len(kb.DiscardTargets))
+}
+
+// Counts reports how many commands and subcommands the base declares, for the
+// /v1/knowledge endpoint.
+func (kb *KnowledgeBase) Counts() (commands, subcommands int) {
+	commands, subcommands, _, _ = kb.counts()
+	return commands, subcommands
+}
+
+func (kb *KnowledgeBase) counts() (commands, subcommands, flags, switches int) {
+	var walk func(s *Spec)
+	walk = func(s *Spec) {
 		for _, f := range s.Flags {
 			if f.TakesValue {
 				flags++
@@ -299,15 +313,12 @@ func (kb *KnowledgeBase) Summary() string {
 		}
 		for _, sub := range s.Subcommands {
 			subcommands++
-			count(sub)
+			walk(sub)
 		}
 	}
 	for _, s := range kb.Commands {
 		commands++
-		count(s)
+		walk(s)
 	}
-	return fmt.Sprintf(
-		"knowledge base %s\n  %d commands, %d subcommands\n  %d value-taking flags, %d switches\n  %d trusted program dirs, %d discard targets",
-		kb.Source, commands, subcommands, flags, switches,
-		len(kb.TrustedProgramDirs), len(kb.DiscardTargets))
+	return commands, subcommands, flags, switches
 }

@@ -370,11 +370,11 @@ func (a *Analyzer) inputRedirs(s *syntax.Stmt) Value {
 		}
 		if r.Op == syntax.Hdoc || r.Op == syntax.DashHdoc {
 			if r.Hdoc != nil {
-				in = union(in, a.word(r.Hdoc).then("supplied by here-document", a.span(r)))
+				in = union(in, a.word(r.Hdoc).then(StepHereDocument, "supplied by here-document", a.span(r)))
 			}
 			continue
 		}
-		in = union(in, a.word(r.Word).then("redirected into the command's stdin", a.span(r)))
+		in = union(in, a.word(r.Word).then(StepStdinRedirect, "redirected into the command's stdin", a.span(r)))
 	}
 	return in
 }
@@ -392,7 +392,7 @@ func (a *Analyzer) outputRedirs(s *syntax.Stmt, out Value) {
 		}
 		for _, f := range out.Flows {
 			a.Findings = append(a.Findings, Finding{
-				Flow:     f.then("redirected to "+target, a.span(r)),
+				Flow:     f.then(StepRedirect, "redirected to "+target, a.span(r)),
 				Command:  "redirect",
 				Arg:      ">",
 				Slot:     SlotDisk,
@@ -420,7 +420,7 @@ func (a *Analyzer) command(c syntax.Command, stdin Value) Value {
 		// becomes the right side's stdin. && and || only sequence.
 		if x.Op == syntax.Pipe || x.Op == syntax.PipeAll {
 			left := a.stmt(x.X, stdin)
-			return a.stmt(x.Y, left.then("piped into the next command", a.span(x)))
+			return a.stmt(x.Y, left.then(StepPipe, "piped into the next command", a.span(x)))
 		}
 		a.stmt(x.X, stdin)
 		return a.stmt(x.Y, stdin)
@@ -538,6 +538,7 @@ func (a *Analyzer) commandOutput(spec *Spec, c *syntax.CallExpr, args []*syntax.
 		label := a.text(c)
 		out = union(out, Value{Flows: []Flow{{
 			Origin: label,
+			Kind:   OriginProducer,
 			Why:    spec.Produces,
 			Span:   a.span(c),
 		}}})
@@ -545,16 +546,16 @@ func (a *Analyzer) commandOutput(spec *Spec, c *syntax.CallExpr, args []*syntax.
 	if spec.ReadsFiles {
 		// Sensitivity comes from the paths, which a.word already evaluated.
 		for i := range args {
-			out = union(out, values[i].then("read and printed on stdout", a.span(args[i])))
+			out = union(out, values[i].then(StepFileRead, "read and printed on stdout", a.span(args[i])))
 		}
 	}
 	if spec.PrintsArgs {
 		for i := range args {
-			out = union(out, values[i].then("printed on stdout by "+a.text(c.Args[0]), a.span(args[i])))
+			out = union(out, values[i].then(StepPrintsArgs, "printed on stdout by "+a.text(c.Args[0]), a.span(args[i])))
 		}
 	}
 	if spec.PassesStdin {
-		out = union(out, stdin.then("passed through "+a.text(c.Args[0]), a.span(c.Args[0])))
+		out = union(out, stdin.then(StepPassthrough, "passed through "+a.text(c.Args[0]), a.span(c.Args[0])))
 	}
 	return out
 }
@@ -575,7 +576,7 @@ func (a *Analyzer) recordSinks(spec *Spec, name string, c *syntax.CallExpr, args
 		a.recordUnresolved(stdin, spec.StdinSlot, name, "stdin", spec.Emits, a.span(c))
 		for _, f := range stdin.Flows {
 			a.Findings = append(a.Findings, Finding{
-				Flow:     f.then("consumed from stdin by "+name+" ("+spec.StdinSlot.String()+" slot)", a.span(c)),
+				Flow:     f.then(StepSink, "consumed from stdin by "+name+" ("+spec.StdinSlot.String()+" slot)", a.span(c)),
 				Command:  name,
 				Arg:      "stdin",
 				Slot:     spec.StdinSlot,
@@ -601,7 +602,7 @@ func (a *Analyzer) recordSinks(spec *Spec, name string, c *syntax.CallExpr, args
 		a.recordUnresolved(v, b.slot, name, b.flag, spec.Emits, a.span(args[b.index]))
 		for _, f := range v.Flows {
 			a.Findings = append(a.Findings, Finding{
-				Flow:     f.then("used as "+name+" "+b.flag+" ("+b.slot.String()+" slot)", a.span(args[b.index])),
+				Flow:     f.then(StepSink, "used as "+name+" "+b.flag+" ("+b.slot.String()+" slot)", a.span(args[b.index])),
 				Command:  name,
 				Arg:      b.flag,
 				Slot:     b.slot,
@@ -632,9 +633,10 @@ func (a *Analyzer) recordUnresolved(v Value, s Slot, name, arg, emits string, sp
 		a.Findings = append(a.Findings, Finding{
 			Flow: Flow{
 				Origin: u.Command,
+				Kind:   OriginUnknownOutput,
 				Why:    "not in the knowledge base, so what it prints could be anything",
 				Span:   u.Span,
-				Steps:  []Step{{Desc: "sent as " + name + " " + arg + " (" + s.String() + " slot)", Span: span}},
+				Steps:  []Step{{Kind: StepSink, Desc: "sent as " + name + " " + arg + " (" + s.String() + " slot)", Span: span}},
 			},
 			Command:    name,
 			Arg:        arg,
@@ -668,7 +670,7 @@ func (a *Analyzer) computedName(c *syntax.CallExpr, computed string, stdin Value
 		Receives: !in.empty(),
 	})
 
-	out := in.then("passed through a command named by "+computed, a.span(c))
+	out := in.then(StepComputedName, "passed through a command named by "+computed, a.span(c))
 	out.Unknowns = append(out.Unknowns, Unknown{
 		Command: label,
 		Reason:  "program name produced by " + computed,
@@ -700,7 +702,7 @@ func (a *Analyzer) unknownCommand(c *syntax.CallExpr, bin, path string, trusted 
 	}
 	a.Uses = append(a.Uses, use)
 
-	out := in.then("passed through unknown command `"+bin+"`", a.span(c))
+	out := in.then(StepUnknownCommand, "passed through unknown command `"+bin+"`", a.span(c))
 	out.Unknowns = append(out.Unknowns, Unknown{
 		Command: bin,
 		Reason:  "not in the knowledge base",
@@ -726,6 +728,7 @@ func (a *Analyzer) assign(as *syntax.Assign) {
 	if v.empty() && a.kb.SecretVarNames.MatchString(name) {
 		v = Value{Flows: []Flow{{
 			Origin: a.text(as),
+			Kind:   OriginSecretVar,
 			Why:    "variable is named like a secret (heuristic)",
 			Span:   a.span(as),
 		}}}
@@ -734,7 +737,7 @@ func (a *Analyzer) assign(as *syntax.Assign) {
 	if as.Append {
 		v = union(a.env[name], v)
 	}
-	a.env[name] = v.then("assigned to $"+name, a.span(as))
+	a.env[name] = v.then(StepAssignment, "assigned to $"+name, a.span(as))
 }
 
 // -------------------------------------------------------------------- words
@@ -765,6 +768,7 @@ func (a *Analyzer) part(p syntax.WordPart) Value {
 		if a.kb.SecretPaths.MatchString(x.Value) {
 			return Value{Flows: []Flow{{
 				Origin: x.Value,
+				Kind:   OriginCredentialPath,
 				Why:    "path names a credential file (heuristic)",
 				Span:   a.span(x),
 			}}}
@@ -777,6 +781,7 @@ func (a *Analyzer) part(p syntax.WordPart) Value {
 		if a.kb.SecretPaths.MatchString(x.Value) {
 			return Value{Flows: []Flow{{
 				Origin: x.Value,
+				Kind:   OriginCredentialPath,
 				Why:    "path names a credential file (heuristic)",
 				Span:   a.span(x),
 			}}}
@@ -793,13 +798,13 @@ func (a *Analyzer) part(p syntax.WordPart) Value {
 		// $(...) and `...`: whatever the inner commands print becomes part
 		// of this word.
 		inner := a.stmts(x.Stmts, Value{})
-		return inner.then("captured by command substitution", a.span(x))
+		return inner.then(StepCommandSubstitution, "captured by command substitution", a.span(x))
 
 	case *syntax.ProcSubst:
 		// <(...) exposes the inner command's output as a file path, which is
 		// then read by whatever receives the argument.
 		inner := a.stmts(x.Stmts, Value{})
-		return inner.then("exposed as a file by process substitution", a.span(x))
+		return inner.then(StepProcessSubstitution, "exposed as a file by process substitution", a.span(x))
 
 	case *syntax.ExtGlob, *syntax.ArithmExp:
 		return Value{}
@@ -819,12 +824,13 @@ func (a *Analyzer) paramExp(x *syntax.ParamExp) Value {
 	name := x.Param.Value
 
 	if v, ok := a.env[name]; ok {
-		return v.then("expanded as $"+name, a.span(x))
+		return v.then(StepExpansion, "expanded as $"+name, a.span(x))
 	}
 	// Not assigned in this command, so it comes from the ambient environment.
 	if a.kb.SecretVarNames.MatchString(name) {
 		return Value{Flows: []Flow{{
 			Origin: "$" + name,
+			Kind:   OriginSecretVar,
 			Why:    "environment variable named like a secret (heuristic)",
 			Span:   a.span(x),
 		}}}

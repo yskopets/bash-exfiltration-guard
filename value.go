@@ -18,22 +18,61 @@ type Span struct {
 
 func (s Span) String() string { return fmt.Sprintf("%d:%d", s.Start, s.End) }
 
+// StepKind names a hop in machine-readable form.
+//
+// Desc alone is prose, which is fine for a terminal and useless as a contract:
+// a UI that wants to draw the flow cannot switch on a sentence. Every hop
+// carries both -- the kind for callers, the description for people.
+type StepKind string
+
+const (
+	StepCommandSubstitution StepKind = "command-substitution"
+	StepProcessSubstitution StepKind = "process-substitution"
+	StepAssignment          StepKind = "assignment"
+	StepExpansion           StepKind = "expansion"
+	StepPipe                StepKind = "pipe"
+	StepPassthrough         StepKind = "passthrough"
+	StepFileRead            StepKind = "file-read"
+	StepPrintsArgs          StepKind = "prints-args"
+	StepHereDocument        StepKind = "here-document"
+	StepStdinRedirect       StepKind = "stdin-redirect"
+	StepRedirect            StepKind = "redirect"
+	StepSink                StepKind = "sink"
+	StepUnknownCommand      StepKind = "unknown-command"
+	StepComputedName        StepKind = "computed-name"
+)
+
 // Step is one hop that data takes: out of a command substitution, into a
 // variable, back out of that variable, into a command argument.
 type Step struct {
-	Desc string `json:"desc"`
-	Span Span   `json:"span"`
+	Kind StepKind `json:"kind"`
+	Desc string   `json:"desc"`
+	Span Span     `json:"span"`
 }
+
+// OriginKind classifies where a flow started, in machine-readable form. The
+// three heuristic kinds are worth telling apart from a declared producer: a
+// caller may want to weigh `gh auth token` differently from a variable that
+// merely has "TOKEN" in its name.
+type OriginKind string
+
+const (
+	OriginProducer       OriginKind = "producer"
+	OriginCredentialPath OriginKind = "credential-path"
+	OriginSecretVar      OriginKind = "secret-var"
+	OriginUnknownOutput  OriginKind = "unknown-output"
+)
 
 // Flow is one complete path taken by a piece of sensitive data, from the
 // place it originated to wherever it currently sits. A Flow is the edge list
 // of the data flow graph; the graph is kept as paths rather than as a node
 // set because a path is what a human needs to read.
 type Flow struct {
-	Origin string `json:"origin"` // the source text, e.g. "gh auth token"
-	Why    string `json:"why"`    // why that source is sensitive
-	Span   Span   `json:"span"`   // where the origin sits in the command
-	Steps  []Step `json:"steps"`
+	Origin string     `json:"origin"` // the source text, e.g. "gh auth token"
+	Kind   OriginKind `json:"kind"`   // what sort of source that is
+	Why    string     `json:"why"`    // why that source is sensitive
+	Span   Span       `json:"span"`   // where the origin sits in the command
+	Steps  []Step     `json:"steps"`
 }
 
 // then returns a copy of f with one more hop appended.
@@ -41,10 +80,10 @@ type Flow struct {
 // The copy is deliberate. Two words that both read $TOKEN each continue the
 // same stored Flow, and appending in place would let the first one's history
 // leak into the second's.
-func (f Flow) then(desc string, span Span) Flow {
+func (f Flow) then(kind StepKind, desc string, span Span) Flow {
 	steps := make([]Step, len(f.Steps), len(f.Steps)+1)
 	copy(steps, f.Steps)
-	f.Steps = append(steps, Step{Desc: desc, Span: span})
+	f.Steps = append(steps, Step{Kind: kind, Desc: desc, Span: span})
 	return f
 }
 
@@ -68,10 +107,10 @@ type Value struct {
 func (v Value) empty() bool { return len(v.Flows) == 0 && len(v.Unknowns) == 0 }
 
 // then advances every flow in the value by one hop.
-func (v Value) then(desc string, span Span) Value {
+func (v Value) then(kind StepKind, desc string, span Span) Value {
 	out := Value{Unknowns: v.Unknowns}
 	for _, f := range v.Flows {
-		out.Flows = append(out.Flows, f.then(desc, span))
+		out.Flows = append(out.Flows, f.then(kind, desc, span))
 	}
 	return out
 }

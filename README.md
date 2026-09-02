@@ -5,7 +5,7 @@ AST, traces where security-sensitive data comes from and where it ends up,
 reports the path it took, and decides whether to **allow or deny** the command.
 
 ```
-$ ./guard 'curl -s -H "Authorization: Bearer $(gh auth token)" https://api.github.com/x'
+$ ./guard assess 'curl -s -H "Authorization: Bearer $(gh auth token)" https://api.github.com/x'
 
 commands
   [1] gh auth token                          fully understood
@@ -37,12 +37,15 @@ verdict
 ```bash
 go build -o guard .
 
-./guard '<bash command>'              # human-readable report
-./guard -json '<bash command>'        # coverage, flow graph and verdict as JSON
-./guard -q '<bash command>'           # verdict through the exit code only
-./guard -kb ./knowledge.yaml '<cmd>'  # use a different knowledge base
-./guard -check                        # validate a knowledge base and stop
-echo '<bash command>' | ./guard       # read from stdin
+./guard assess '<bash command>'        # human-readable report
+./guard assess --json '<bash command>' # the same assessment the HTTP API returns
+./guard assess -q '<bash command>'     # verdict through the exit code only
+echo '<bash command>' | ./guard assess # read from stdin
+
+./guard config check                   # load and validate a knowledge base
+./guard serve                          # run the HTTP API
+
+./guard --kb ./knowledge.yaml ...      # any subcommand, different knowledge base
 
 # exit codes are the interface for a policy gate
 #   0  ALLOW
@@ -487,6 +490,85 @@ What survives is what should: `curl -s -H "Authorization: Bearer $(gh auth
 token)"` as intended use, and `gh auth token > /tmp/ght.txt` as a credential
 written to disk.
 
+## HTTP API
+
+```bash
+./guard serve --addr 127.0.0.1:8080
+```
+
+**The server analyzes commands. It never executes one**, never spawns a shell,
+and never touches the paths a command mentions. The only thing it does with
+the string it is handed is parse it and walk the syntax tree.
+
+It is an unauthenticated local sidecar. The default bind is loopback and it
+should stay there.
+
+| endpoint | |
+|---|---|
+| `POST /v1/assess` | body `{"command": "..."}` → an assessment |
+| `GET /v1/knowledge` | which knowledge base is loaded |
+
+There is no `/healthz`. `GET /v1/knowledge` is cheap, needs no analysis, and
+answers "is it up?" and "which policy is it running?" together — strictly more
+than a bare 200 would say.
+
+A `DENY` is a successful assessment, so it returns **200**. So does a command
+that cannot be parsed: `"parsed": false` with the verdict `DENY`. Returning
+4xx there would invite a caller to read "refused" as "retry". `400` is for a
+malformed request, `413` for a body over 1 MiB, `405` for the wrong method.
+
+### The response
+
+`guard assess --json` emits exactly the same shape, so one parser serves both.
+
+```jsonc
+{
+  "verdict": "DENY",
+  "knowledgeBase": "built-in",
+  "parsed": true,
+  "message": "DENY\n  - sensitive data reaches the network via curl -d (content slot)",
+  "reasons": ["sensitive data reaches the network via curl -d (content slot)"],
+
+  "commands": [ /* per-command coverage: what the base did and did not account for */ ],
+
+  // the narrative: ordered hops, each with a byte span into the command
+  "flows": [{
+    "origin": {"label": "gh auth token", "kind": "producer",
+               "why": "prints the GitHub CLI's stored OAuth token",
+               "span": {"start": 8, "end": 21}},
+    "steps": [
+      {"kind": "command-substitution", "label": "captured by command substitution", "span": {...}},
+      {"kind": "assignment", "label": "assigned to $TOKEN", "span": {...}},
+      {"kind": "expansion",  "label": "expanded as $TOKEN", "span": {...}},
+      {"kind": "sink", "label": "used as curl -d (content slot)",
+       "slot": "content", "emits": "the network", "span": {...}}
+    ],
+    "outcome": "exposed"
+  }],
+
+  // the same information deduplicated, for drawing
+  "graph": {
+    "nodes": [{"id": "n1", "kind": "source",   "label": "gh auth token"},
+              {"id": "n2", "kind": "variable", "label": "$TOKEN"},
+              {"id": "n3", "kind": "sink",     "label": "curl -d",
+               "slot": "content", "emits": "the network"}],
+    "edges": [{"from": "n1", "to": "n2", "kind": "assignment"},
+              {"from": "n2", "to": "n3", "kind": "sink"}]
+  }
+}
+```
+
+Every hop carries a machine-readable `kind` next to its prose label. Prose is
+fine for a terminal and useless as a contract — a UI cannot switch on a
+sentence — so both travel together. `outcome` is `exposed`, `intended-use` or
+`unresolved`, matching the three labels the terminal prints.
+
+**`flows` and `graph` are the same data, shaped for two jobs.** Flows are the
+narrative and repeat shared hops; the graph deduplicates them, so
+`X=$(gh auth token); curl -H "...$X" -d "$X" https://x` is two flows but
+**one** source and **one** `$TOKEN` node feeding two sinks — which is what
+actually happens, and what a diagram should show.
+
 ## What this prototype does not do
 
 Stated explicitly, because a security tool that hides its blind spots is worse
@@ -510,8 +592,12 @@ than one that has none.
   declares the ones that matter plus the common switches. Arity for a full
   table would be generated from `--help` or shell completions and written into
   the YAML, not typed out.
-- **One knowledge base at a time.** `-kb` replaces rather than layers. A site
+- **One knowledge base at a time.** `--kb` replaces rather than layers. A site
   base over a built-in default is the obvious next step.
+- **The API is unauthenticated, and the base is loaded once.** No auth, no
+  TLS, no hot reload. Reloading mid-flight would make "which policy produced
+  this verdict" harder to answer, which is the property `knowledgeBase`
+  exists to preserve.
 - **No value computation.** The analyzer knows a word carries a credential; it
   never knows which one, and cannot tell `https://api.github.com` from
   `https://evil.com`. Destination allowlisting would be a separate layer.
@@ -533,7 +619,11 @@ than one that has none.
 
 | file | contents |
 |---|---|
-| `main.go` | CLI and report rendering |
+| `main.go` | the cobra root command and exit codes |
+| `cmd_assess.go`, `cmd_config.go`, `cmd_serve.go` | one subcommand each |
+| `report.go` | rendering an assessment for a terminal |
+| `api.go` | the wire contract, shared by `--json` and the HTTP API |
+| `server.go` | the HTTP API |
 | `analyze.go` | the AST walk that builds the flow graph |
 | `value.go` | what "data" means: `Flow`, `Step`, `Value` |
 | `knowledge.yaml` | **the knowledge base** — the only program-specific knowledge |
@@ -541,4 +631,7 @@ than one that has none.
 | `knowledge_load.go` | loading and validating a knowledge base |
 | `analyze_test.go` | flow traces asserted hop by hop |
 | `knowledge_load_test.go` | one test per way of writing an invalid base |
+| `api_test.go` | the wire contract, and graph convergence |
+| `server_test.go` | endpoints, status codes, concurrency under `-race` |
+| `cmd_test.go` | exit codes, and that a denial prints no usage text |
 | `probes/` | the parser comparison, reproducible via `run.sh` |
