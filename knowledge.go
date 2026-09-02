@@ -52,6 +52,30 @@ type SlotRule struct {
 
 func slot(s Slot) SlotRule { return SlotRule{Slot: s} }
 
+// FlagSpec says whether a flag consumes the following word, and where that
+// value lands.
+//
+// These are two different kinds of knowledge. Arity is what the parser needs
+// in order to tokenize correctly -- without it, `curl -s https://x` cannot be
+// told apart from `curl -o https://x`. The slot is what the classifier needs
+// in order to judge. A flag absent from a command's table means BOTH are
+// unknown, which is what the deny rule in analyze.go keys on.
+type FlagSpec struct {
+	TakesValue bool
+	Rule       SlotRule
+}
+
+// noValue is a boolean switch: it consumes no following word.
+var noValue = FlagSpec{}
+
+// takes declares a flag whose value lands in a fixed slot.
+func takes(s Slot) FlagSpec { return FlagSpec{TakesValue: true, Rule: slot(s)} }
+
+// takesIf declares a flag whose slot depends on the value it is handed.
+func takesIf(when *regexp.Regexp, then, otherwise Slot) FlagSpec {
+	return FlagSpec{TakesValue: true, Rule: slotIf(when, then, otherwise)}
+}
+
 func slotIf(when *regexp.Regexp, then, otherwise Slot) SlotRule {
 	return SlotRule{Slot: then, When: when, Else: otherwise}
 }
@@ -99,7 +123,12 @@ type Spec struct {
 	// Flags maps a flag that takes a value to the slot that value lands in.
 	// A flag absent from this map is assumed to be a boolean switch -- see
 	// bindArgs in analyze.go, where that assumption is recorded as a note.
-	Flags map[string]SlotRule
+	Flags map[string]FlagSpec
+
+	// NumericFlag marks a command that accepts a bare count as a short option
+	// -- `head -20`, `tail -5`, `grep -3`. Without this the digits are read
+	// as a cluster of one-character flags and every one of them is a gap.
+	NumericFlag bool
 
 	// Positional is the slot for arguments that are not flags or flag values.
 	Positional Slot
@@ -117,35 +146,95 @@ var commands = map[string]*Spec{
 	"env":      {Produces: "prints every environment variable, including exported secrets"},
 	"printenv": {Produces: "prints environment variables, including exported secrets"},
 
-	"cat":  {ReadsFiles: true},
-	"head": {ReadsFiles: true, PassesStdin: true},
-	"tail": {ReadsFiles: true, PassesStdin: true},
+	"cat": {ReadsFiles: true, Flags: map[string]FlagSpec{
+		"-n": noValue, "-b": noValue, "-e": noValue, "-s": noValue,
+		"-t": noValue, "-v": noValue, "-A": noValue, "-E": noValue, "-T": noValue,
+	}},
+	"head": {ReadsFiles: true, PassesStdin: true, NumericFlag: true, Flags: map[string]FlagSpec{
+		"-n": takes(SlotNone), "--lines": takes(SlotNone),
+		"-c": takes(SlotNone), "--bytes": takes(SlotNone),
+		"-q": noValue, "--quiet": noValue, "-v": noValue, "--verbose": noValue,
+	}},
+	"tail": {ReadsFiles: true, PassesStdin: true, NumericFlag: true, Flags: map[string]FlagSpec{
+		"-n": takes(SlotNone), "--lines": takes(SlotNone),
+		"-c": takes(SlotNone), "--bytes": takes(SlotNone),
+		"-f": noValue, "--follow": noValue, "-F": noValue,
+		"-q": noValue, "--quiet": noValue, "-v": noValue, "--verbose": noValue,
+	}},
 
 	"echo":   {PrintsArgs: true},
 	"printf": {PrintsArgs: true},
 
 	// Transforms. Encoding a secret does not make it stop being a secret, so
 	// these pass the flow straight through.
-	"base64": {PassesStdin: true, ReadsFiles: true},
-	"gzip":   {PassesStdin: true, ReadsFiles: true},
-	"tr":     {PassesStdin: true},
-	"xxd":    {PassesStdin: true, ReadsFiles: true},
-	"jq":     {PassesStdin: true, ReadsFiles: true},
+	"base64": {PassesStdin: true, ReadsFiles: true, Flags: map[string]FlagSpec{
+		"-d": noValue, "--decode": noValue, "-i": noValue, "--ignore-garbage": noValue,
+		"-w": takes(SlotNone), "--wrap": takes(SlotNone),
+	}},
+	"gzip": {PassesStdin: true, ReadsFiles: true},
+	"tr": {PassesStdin: true, Flags: map[string]FlagSpec{
+		"-d": noValue, "--delete": noValue, "-s": noValue, "-c": noValue, "-t": noValue,
+	}},
+	"xxd": {PassesStdin: true, ReadsFiles: true},
+	"jq": {PassesStdin: true, ReadsFiles: true, Flags: map[string]FlagSpec{
+		"-r": noValue, "--raw-output": noValue, "-c": noValue, "--compact-output": noValue,
+		"-n": noValue, "--null-input": noValue, "-s": noValue, "--slurp": noValue,
+		"-e": noValue, "--exit-status": noValue, "-j": noValue, "-a": noValue,
+		"-R": noValue, "--raw-input": noValue, "-S": noValue, "--sort-keys": noValue,
+		"--tab": noValue, "-M": noValue, "-C": noValue,
+		"--arg": takes(SlotNone), "--argjson": takes(SlotNone),
+		"--slurpfile": takes(SlotNone), "--rawfile": takes(SlotNone),
+		"--indent": takes(SlotNone), "-f": takes(SlotNone), "--from-file": takes(SlotNone),
+	}},
 
 	// The standard filter set. These select or reshape their input and emit
 	// the selected data, so a secret survives them -- `cat ~/.ssh/id_rsa |
 	// grep PRIVATE` still carries the key. Without these entries every
 	// pipeline cascades "unknown command" notes and buries the real ones.
-	"grep":  {PassesStdin: true, ReadsFiles: true},
-	"egrep": {PassesStdin: true, ReadsFiles: true},
-	"rg":    {PassesStdin: true, ReadsFiles: true},
-	"sort":  {PassesStdin: true, ReadsFiles: true},
-	"uniq":  {PassesStdin: true, ReadsFiles: true},
-	"cut":   {PassesStdin: true, ReadsFiles: true},
-	"sed":   {PassesStdin: true, ReadsFiles: true},
-	"awk":   {PassesStdin: true, ReadsFiles: true},
-	"comm":  {ReadsFiles: true},
-	"rev":   {PassesStdin: true},
+	"grep":  {PassesStdin: true, ReadsFiles: true, NumericFlag: true, Flags: grepFlags},
+	"egrep": {PassesStdin: true, ReadsFiles: true, NumericFlag: true, Flags: grepFlags},
+	"rg":    {PassesStdin: true, ReadsFiles: true, Flags: grepFlags},
+	"sort": {PassesStdin: true, ReadsFiles: true, Flags: map[string]FlagSpec{
+		"-r": noValue, "--reverse": noValue, "-n": noValue, "--numeric-sort": noValue,
+		"-u": noValue, "--unique": noValue, "-f": noValue, "-b": noValue,
+		"-h": noValue, "-V": noValue, "-c": noValue, "-s": noValue, "-z": noValue,
+		"-g": noValue, "-M": noValue, "-R": noValue,
+		"-k": takes(SlotNone), "--key": takes(SlotNone),
+		"-t": takes(SlotNone), "--field-separator": takes(SlotNone),
+		"-T": takes(SlotNone), "-S": takes(SlotNone),
+		// `sort -o FILE` writes its output to a file rather than to stdout.
+		"-o": takes(SlotDisk), "--output": takes(SlotDisk),
+	}},
+	"uniq": {PassesStdin: true, ReadsFiles: true, Flags: map[string]FlagSpec{
+		"-c": noValue, "--count": noValue, "-d": noValue, "-u": noValue,
+		"-i": noValue, "-z": noValue,
+		"-f": takes(SlotNone), "-s": takes(SlotNone), "-w": takes(SlotNone),
+	}},
+	"cut": {PassesStdin: true, ReadsFiles: true, Flags: map[string]FlagSpec{
+		"-d": takes(SlotNone), "--delimiter": takes(SlotNone),
+		"-f": takes(SlotNone), "--fields": takes(SlotNone),
+		"-c": takes(SlotNone), "--characters": takes(SlotNone),
+		"-b": takes(SlotNone), "--bytes": takes(SlotNone),
+		"-s": noValue, "--only-delimited": noValue, "-z": noValue,
+	}},
+	// `sed -i` is deliberately absent: it is a switch on GNU sed and takes a
+	// suffix on BSD sed. An ambiguous arity is a genuine gap, and leaving it
+	// out means it denies rather than being guessed at.
+	"sed": {PassesStdin: true, ReadsFiles: true, Flags: map[string]FlagSpec{
+		"-n": noValue, "--quiet": noValue, "--silent": noValue,
+		"-E": noValue, "-r": noValue, "--regexp-extended": noValue,
+		"-s": noValue, "-z": noValue, "-u": noValue,
+		"-e": takes(SlotNone), "--expression": takes(SlotNone),
+		"-f": takes(SlotNone), "--file": takes(SlotNone),
+	}},
+	"awk": {PassesStdin: true, ReadsFiles: true, Flags: map[string]FlagSpec{
+		"-F": takes(SlotNone), "-v": takes(SlotNone),
+		"-f": takes(SlotNone), "--file": takes(SlotNone),
+	}},
+	"comm": {ReadsFiles: true, Flags: map[string]FlagSpec{
+		"-1": noValue, "-2": noValue, "-3": noValue, "-i": noValue, "-z": noValue,
+	}},
+	"rev": {PassesStdin: true},
 
 	// Reducers: known commands whose output does not carry their input on.
 	// `wc` turns data into a count, `ls` prints names rather than contents,
@@ -155,8 +244,17 @@ var commands = map[string]*Spec{
 	// or existence oracle (`printenv GH_TOKEN | wc -c`) is a real but much
 	// weaker leak, and treating it as one drowns the report. Side channels
 	// of this kind are out of scope for the prototype.
-	"wc":    {},
-	"ls":    {},
+	"wc": {Flags: map[string]FlagSpec{
+		"-l": noValue, "--lines": noValue, "-w": noValue, "--words": noValue,
+		"-c": noValue, "--bytes": noValue, "-m": noValue, "--chars": noValue,
+		"-L": noValue, "--max-line-length": noValue,
+	}},
+	"ls": {NumericFlag: true, Flags: map[string]FlagSpec{
+		"-l": noValue, "-a": noValue, "-A": noValue, "-h": noValue, "-R": noValue,
+		"-t": noValue, "-r": noValue, "-S": noValue, "-1": noValue, "-d": noValue,
+		"-F": noValue, "-i": noValue, "-n": noValue, "-p": noValue, "-u": noValue,
+		"--color": takes(SlotNone), "--time-style": takes(SlotNone),
+	}},
 	"[":     {},
 	"test":  {},
 	"true":  {},
@@ -169,21 +267,25 @@ var commands = map[string]*Spec{
 		"issue": {Subcommands: map[string]*Spec{
 			"comment": {
 				Emits: "a public GitHub comment",
-				Flags: map[string]SlotRule{
-					"--body":      slot(SlotContent),
-					"-b":          slot(SlotContent),
-					"--body-file": slot(SlotFile),
-					"-F":          slot(SlotFile),
+				Flags: map[string]FlagSpec{
+					"--body":      takes(SlotContent),
+					"-b":          takes(SlotContent),
+					"--body-file": takes(SlotFile),
+					"-F":          takes(SlotFile),
+					"-R":          takes(SlotNone), "--repo": takes(SlotNone),
+					"--edit-last": noValue,
 				},
 			},
 		}},
 		"pr": {Subcommands: map[string]*Spec{
 			"comment": {
 				Emits: "a public GitHub comment",
-				Flags: map[string]SlotRule{
-					"--body":      slot(SlotContent),
-					"-b":          slot(SlotContent),
-					"--body-file": slot(SlotFile),
+				Flags: map[string]FlagSpec{
+					"--body":      takes(SlotContent),
+					"-b":          takes(SlotContent),
+					"--body-file": takes(SlotFile),
+					"-R":          takes(SlotNone), "--repo": takes(SlotNone),
+					"--edit-last": noValue,
 				},
 			},
 		}},
@@ -207,47 +309,72 @@ var commands = map[string]*Spec{
 	// ------------------------------------------------------------- sinks
 	"curl": {
 		Emits: "the network",
-		Flags: map[string]SlotRule{
-			"-H":              slotIf(authHeader, SlotAuth, SlotContent),
-			"--header":        slotIf(authHeader, SlotAuth, SlotContent),
-			"-u":              slot(SlotAuth),
-			"--user":          slot(SlotAuth),
-			"-b":              slot(SlotAuth),
-			"--cookie":        slot(SlotAuth),
-			"--oauth2-bearer": slot(SlotAuth),
+		Flags: map[string]FlagSpec{
+			// Credential slots.
+			"-H":              takesIf(authHeader, SlotAuth, SlotContent),
+			"--header":        takesIf(authHeader, SlotAuth, SlotContent),
+			"-u":              takes(SlotAuth),
+			"--user":          takes(SlotAuth),
+			"-b":              takes(SlotAuth),
+			"--cookie":        takes(SlotAuth),
+			"--oauth2-bearer": takes(SlotAuth),
 
-			"-d":               slot(SlotContent),
-			"--data":           slot(SlotContent),
-			"--data-raw":       slot(SlotContent),
-			"--data-binary":    slot(SlotContent),
-			"--data-urlencode": slot(SlotContent),
-			"-F":               slot(SlotContent),
-			"--form":           slot(SlotContent),
+			// Payload slots.
+			"-d":               takes(SlotContent),
+			"--data":           takes(SlotContent),
+			"--data-raw":       takes(SlotContent),
+			"--data-binary":    takes(SlotContent),
+			"--data-urlencode": takes(SlotContent),
+			"-F":               takes(SlotContent),
+			"--form":           takes(SlotContent),
+			"-T":               takes(SlotFile),
+			"--upload-file":    takes(SlotFile),
 
-			"-T":            slot(SlotFile),
-			"--upload-file": slot(SlotFile),
+			// Value-taking flags that carry nothing outward. They are listed
+			// so their value is consumed rather than mistaken for the URL.
+			"-o": takes(SlotNone), "--output": takes(SlotNone),
+			"-X": takes(SlotNone), "--request": takes(SlotNone),
+			"-A": takes(SlotNone), "--user-agent": takes(SlotNone),
+			"-e": takes(SlotNone), "--referer": takes(SlotNone),
+			"-w": takes(SlotNone), "--write-out": takes(SlotNone),
+			"-m": takes(SlotNone), "--max-time": takes(SlotNone),
+			"--connect-timeout": takes(SlotNone),
+			"--retry":           takes(SlotNone),
+			"-D":                takes(SlotNone), "--dump-header": takes(SlotNone),
+			"-x": takes(SlotNone), "--proxy": takes(SlotNone),
 
-			// Listed so that their values are not mistaken for positional
-			// URLs; none of them carry data outward.
-			"-o": slot(SlotNone), "--output": slot(SlotNone),
-			"-X": slot(SlotNone), "--request": slot(SlotNone),
-			"-A": slot(SlotNone), "--user-agent": slot(SlotNone),
-			"-e": slot(SlotNone), "--referer": slot(SlotNone),
-			"-w": slot(SlotNone), "--write-out": slot(SlotNone),
+			// Switches. Declaring these is what lets an ordinary invocation
+			// come out fully understood: an undeclared flag is a gap, and a
+			// gap denies as soon as data flows through the command.
+			"-s": noValue, "--silent": noValue,
+			"-S": noValue, "--show-error": noValue,
+			"-f": noValue, "--fail": noValue,
+			"-L": noValue, "--location": noValue,
+			"-i": noValue, "--include": noValue,
+			"-I": noValue, "--head": noValue,
+			"-k": noValue, "--insecure": noValue,
+			"-v": noValue, "--verbose": noValue,
+			"-g": noValue, "--globoff": noValue,
+			"-N": noValue, "--no-buffer": noValue,
+			"--compressed":        noValue,
+			"--fail-with-body":    noValue,
+			"--no-progress-meter": noValue,
+			"--location-trusted":  noValue,
 		},
 		Positional: SlotURL,
 	},
 
 	"wget": {
 		Emits: "the network",
-		Flags: map[string]SlotRule{
-			"--header":      slotIf(authHeader, SlotAuth, SlotContent),
-			"--post-data":   slot(SlotContent),
-			"--body-data":   slot(SlotContent),
-			"--post-file":   slot(SlotFile),
-			"--body-file":   slot(SlotFile),
-			"-O":            slot(SlotNone),
-			"--output-file": slot(SlotNone),
+		Flags: map[string]FlagSpec{
+			"--header":      takesIf(authHeader, SlotAuth, SlotContent),
+			"--post-data":   takes(SlotContent),
+			"--body-data":   takes(SlotContent),
+			"--post-file":   takes(SlotFile),
+			"--body-file":   takes(SlotFile),
+			"-O":            takes(SlotNone),
+			"--output-file": takes(SlotNone),
+			"-q":            noValue, "--quiet": noValue,
 		},
 		Positional: SlotURL,
 	},
@@ -262,6 +389,35 @@ var commands = map[string]*Spec{
 		"push":  {Emits: "a remote git host", Positional: SlotURL},
 		"clone": {Emits: "a remote git host", Positional: SlotURL},
 	}},
+}
+
+// grepFlags is shared by the grep family. None of these carries data outward;
+// `-e` and `-f` supply patterns, and the rest select or format matches.
+var grepFlags = map[string]FlagSpec{
+	"-i": noValue, "--ignore-case": noValue,
+	"-v": noValue, "--invert-match": noValue,
+	"-n": noValue, "--line-number": noValue,
+	"-c": noValue, "--count": noValue,
+	"-l": noValue, "--files-with-matches": noValue,
+	"-L": noValue, "--files-without-match": noValue,
+	"-o": noValue, "--only-matching": noValue,
+	"-q": noValue, "--quiet": noValue,
+	"-s": noValue, "--no-messages": noValue,
+	"-w": noValue, "--word-regexp": noValue,
+	"-x": noValue, "--line-regexp": noValue,
+	"-F": noValue, "--fixed-strings": noValue,
+	"-E": noValue, "--extended-regexp": noValue,
+	"-G": noValue, "-P": noValue, "--perl-regexp": noValue,
+	"-r": noValue, "-R": noValue, "--recursive": noValue,
+	"-a": noValue, "-h": noValue, "-H": noValue, "-z": noValue, "-U": noValue,
+	"-e": takes(SlotNone), "--regexp": takes(SlotNone),
+	"-f": takes(SlotNone), "--file": takes(SlotNone),
+	"-m": takes(SlotNone), "--max-count": takes(SlotNone),
+	"-A": takes(SlotNone), "--after-context": takes(SlotNone),
+	"-B": takes(SlotNone), "--before-context": takes(SlotNone),
+	"-C": takes(SlotNone), "--context": takes(SlotNone),
+	"--include": takes(SlotNone), "--exclude": takes(SlotNone),
+	"--exclude-dir": takes(SlotNone), "--color": takes(SlotNone), "--colour": takes(SlotNone),
 }
 
 // Lookup resolves a command name plus its leading arguments to the most

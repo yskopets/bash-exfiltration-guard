@@ -27,6 +27,43 @@ type Finding struct {
 	Span     Span   `json:"span"`  // the argument word
 }
 
+// ArgUse records how one argument of a command was interpreted, so a report
+// can show exactly which parts the knowledge base accounted for.
+type ArgUse struct {
+	Text  string `json:"text"`
+	Span  Span   `json:"span"`
+	Role  string `json:"role"`
+	Slot  string `json:"slot,omitempty"`
+	Known bool   `json:"known"`
+}
+
+// CommandUse is the per-command coverage record the verdict is built from.
+//
+// Knowing where sensitive data went is not enough to allow or deny. It also
+// matters whether every part of the command it passed through was accounted
+// for: an unmodelled flag could route that data somewhere never inspected.
+type CommandUse struct {
+	Name     string   `json:"name"`
+	Span     Span     `json:"span"`
+	Known    bool     `json:"known"`
+	Args     []ArgUse `json:"args,omitempty"`
+	Gaps     []string `json:"gaps,omitempty"`
+	Receives bool     `json:"receives"`
+	Emits    string   `json:"emits,omitempty"`
+}
+
+// Understood reports whether the knowledge base accounted for the program and
+// for every flag it was given.
+func (u CommandUse) Understood() bool { return u.Known && len(u.Gaps) == 0 }
+
+// Verdict is the allow/deny decision.
+type Verdict string
+
+const (
+	Allow Verdict = "ALLOW"
+	Deny  Verdict = "DENY"
+)
+
 // Note is something the analyzer saw but could not resolve. Notes exist so
 // that the limits of the analysis are visible in the output instead of being
 // silently reported as "no flows found".
@@ -43,8 +80,82 @@ type Analyzer struct {
 	// a flat, flow-insensitive environment: no branch tracking, no scopes.
 	env map[string]Value
 
-	Findings []Finding `json:"findings"`
-	Notes    []Note    `json:"notes"`
+	Findings []Finding    `json:"findings"`
+	Notes    []Note       `json:"notes"`
+	Uses     []CommandUse `json:"commands"`
+}
+
+// Decide computes the allow/deny verdict and the reasons behind it.
+//
+// The rule, stated in one place so that it can be read straight off a report:
+//
+//   - DENY when sensitive data reached a slot that exposes it.
+//   - DENY when sensitive data ENTERED a command -- through an argument or
+//     through stdin -- that the knowledge base does not fully account for.
+//     An unmodelled flag or an unknown program could route that data
+//     anywhere, and "we did not look" is not evidence of safety.
+//   - Otherwise ALLOW.
+//
+// A command with gaps that no sensitive data passes through does not affect
+// the verdict. Not knowing the flags of `ls -lah` is irrelevant when nothing
+// sensitive reaches it.
+//
+// Data a command PRODUCES does not count as entering it: `gh auth token`
+// printing a credential is the command doing its job, and the analyzer goes
+// on to trace where that credential lands.
+func (a *Analyzer) Decide() (Verdict, []string) {
+	var reasons []string
+	verdict := Allow
+
+	for _, f := range a.Findings {
+		if !exposingSlot(f.Slot) {
+			continue
+		}
+		verdict = Deny
+		reasons = append(reasons, "sensitive data reaches "+f.Emits+
+			" via "+f.Command+" "+f.Arg+" ("+f.SlotName+" slot)")
+	}
+
+	for _, u := range a.Uses {
+		if u.Understood() || !u.Receives {
+			continue
+		}
+		verdict = Deny
+		if !u.Known {
+			reasons = append(reasons, "sensitive data enters `"+u.Name+
+				"`, a program not in the knowledge base; where it goes is unknown")
+			continue
+		}
+		reasons = append(reasons, "sensitive data enters `"+u.Name+
+			"`, and the knowledge base does not account for: "+strings.Join(u.Gaps, " "))
+	}
+
+	if verdict == Allow {
+		reasons = append(reasons, "every command carrying sensitive data is fully accounted for")
+		for _, f := range a.Findings {
+			reasons = append(reasons, "credential used in an "+f.SlotName+
+				" slot of "+f.Command+" "+f.Arg+" -- intended use")
+		}
+	}
+	return verdict, reasons
+}
+
+// exposingSlot reports whether a slot puts data somewhere it can be observed
+// by someone who should not see it. An Authorization header is not exposure;
+// that is what the credential is for.
+func exposingSlot(s Slot) bool { return s != SlotAuth && s != SlotNone }
+
+// receives reports whether sensitive data entered a command.
+func receives(values []Value, stdin Value) bool {
+	if !stdin.empty() {
+		return true
+	}
+	for _, v := range values {
+		if !v.empty() {
+			return true
+		}
+	}
+	return false
 }
 
 // Analyze parses a command and maps the flow of sensitive data through it.
@@ -275,8 +386,19 @@ func (a *Analyzer) call(c *syntax.CallExpr, stdin Value) Value {
 		values[i] = a.word(w)
 	}
 
+	scan := bindArgs(a, spec, args, values)
+	a.Uses = append(a.Uses, CommandUse{
+		Name:     fullName,
+		Span:     a.span(c),
+		Known:    true,
+		Args:     scan.uses,
+		Gaps:     scan.gaps,
+		Receives: receives(values, stdin),
+		Emits:    spec.Emits,
+	})
+
 	out := a.commandOutput(spec, c, args, values, stdin)
-	a.recordSinks(spec, fullName, c, args, values, stdin)
+	a.recordSinks(spec, fullName, c, args, values, stdin, scan.bindings)
 	return out
 }
 
@@ -312,7 +434,7 @@ func (a *Analyzer) commandOutput(spec *Spec, c *syntax.CallExpr, args []*syntax.
 
 // recordSinks binds arguments to slots and records every sensitive value that
 // landed somewhere it is exposed.
-func (a *Analyzer) recordSinks(spec *Spec, name string, c *syntax.CallExpr, args []*syntax.Word, values []Value, stdin Value) {
+func (a *Analyzer) recordSinks(spec *Spec, name string, c *syntax.CallExpr, args []*syntax.Word, values []Value, stdin Value, bindings []binding) {
 	if spec.Emits == "" {
 		return
 	}
@@ -336,7 +458,7 @@ func (a *Analyzer) recordSinks(spec *Spec, name string, c *syntax.CallExpr, args
 		}
 	}
 
-	for _, b := range bindArgs(a, spec, args, values) {
+	for _, b := range bindings {
 		if b.slot == SlotNone {
 			continue
 		}
@@ -359,10 +481,6 @@ func (a *Analyzer) recordSinks(spec *Spec, name string, c *syntax.CallExpr, args
 				Span:     a.span(args[b.index]),
 			})
 		}
-		for _, u := range v.Unknowns {
-			a.note("value from unknown command `"+u.Command+"` reaches "+name+" "+b.flag+
-				"; its sensitivity cannot be determined", args[b.index])
-		}
 	}
 }
 
@@ -376,9 +494,12 @@ func (a *Analyzer) unknownCommand(c *syntax.CallExpr, name string, args []*synta
 	}
 	in = union(in, stdin)
 
-	if !in.empty() {
-		a.note("sensitive data reaches unknown command `"+name+"`; where it goes is not known", c)
-	}
+	a.Uses = append(a.Uses, CommandUse{
+		Name:     name,
+		Span:     a.span(c),
+		Known:    false,
+		Receives: !in.empty(),
+	})
 	out := in.then("passed through unknown command `"+name+"`", a.span(c))
 	out.Unknowns = append(out.Unknowns, Unknown{
 		Command: name,
@@ -521,7 +642,16 @@ type binding struct {
 	fromStdin bool // the argument is `@-` or `-`, meaning "read stdin"
 }
 
-// bindArgs associates each argument word with the slot it occupies.
+// argScan is the result of walking a command's arguments: where each value
+// lands, how each argument was read, and which parts were not recognised.
+type argScan struct {
+	bindings []binding
+	uses     []ArgUse
+	gaps     []string
+}
+
+// bindArgs walks a command's arguments, assigning each value to a slot and
+// recording anything the knowledge base did not account for.
 //
 // It handles the four shapes that appear in practice:
 //
@@ -530,25 +660,25 @@ type binding struct {
 //	curl -sH value         clustered short flags, last one takes the value
 //	curl -d@file           value attached directly to a short flag
 //
-// Any flag not listed in the spec is assumed to be a boolean switch. That
-// assumption can mis-assign the following word, so it is recorded as a note.
-func bindArgs(a *Analyzer, spec *Spec, args []*syntax.Word, values []Value) []binding {
-	// guessed reports an assumption about an unrecognised flag, but only when
-	// the word it affects actually carries sensitive data. A note on every
-	// boolean switch (`curl -s`) would bury the ones that matter.
-	guessed := func(i int, text string) {
-		if i < len(values) && !values[i].empty() {
-			a.note("unrecognised flag `"+text+"`; assumed not to take a value, so the "+
-				"following argument may be attributed to the wrong slot", args[i])
-		}
-	}
+// Arity comes from the table, so there is no guessing for a flag the table
+// knows. A flag the table does NOT know is recorded as a gap: both its arity
+// and its slot are unknown, and Decide turns that into a denial as soon as
+// sensitive data passes through the command.
+func bindArgs(a *Analyzer, spec *Spec, args []*syntax.Word, values []Value) argScan {
+	var scan argScan
 
-	var out []binding
+	note := func(i int, role string, s Slot, known bool) {
+		u := ArgUse{Text: a.text(args[i]), Span: a.span(args[i]), Role: role, Known: known}
+		if s != SlotNone {
+			u.Slot = s.String()
+		}
+		scan.uses = append(scan.uses, u)
+	}
 
 	// bind records that args[i] lands in a slot. valueText is the part of the
 	// argument that is actually the value -- the whole word for `-H value`,
 	// but only what follows "=" for `--header=value`.
-	bind := func(i int, rule SlotRule, flag, valueText string) {
+	bind := func(i int, rule SlotRule, flag, valueText, role string) {
 		s := rule.resolve(valueText)
 		fromStdin := false
 		if flag != positionalArg {
@@ -559,7 +689,13 @@ func bindArgs(a *Analyzer, spec *Spec, args []*syntax.Word, values []Value) []bi
 				s = SlotFile
 			}
 		}
-		out = append(out, binding{index: i, slot: s, flag: flag, fromStdin: fromStdin})
+		scan.bindings = append(scan.bindings, binding{index: i, slot: s, flag: flag, fromStdin: fromStdin})
+		note(i, role, s, true)
+	}
+
+	gap := func(i int, flag string) {
+		scan.gaps = append(scan.gaps, flag)
+		note(i, "unrecognised flag", SlotNone, false)
 	}
 
 	for i := 0; i < len(args); i++ {
@@ -567,7 +703,7 @@ func bindArgs(a *Analyzer, spec *Spec, args []*syntax.Word, values []Value) []bi
 		full := a.text(args[i])
 
 		if !strings.HasPrefix(lead, "-") || lead == "-" || lead == "--" {
-			bind(i, slot(spec.Positional), positionalArg, full)
+			bind(i, slot(spec.Positional), positionalArg, full, "positional")
 			continue
 		}
 
@@ -575,57 +711,84 @@ func bindArgs(a *Analyzer, spec *Spec, args []*syntax.Word, values []Value) []bi
 		if strings.HasPrefix(lead, "--") && strings.Contains(lead, "=") {
 			name, _, _ := strings.Cut(lead, "=")
 			_, value, _ := strings.Cut(full, "=")
-			if rule, known := spec.Flags[name]; known {
-				bind(i, rule, name, value)
-			} else if !values[i].empty() {
-				a.note("unknown flag `"+name+"` for this command; its value is not traced", args[i])
+			fs, known := spec.Flags[name]
+			if !known {
+				gap(i, name)
+				continue
 			}
+			bind(i, fs.Rule, name, value, "value of "+name)
 			continue
 		}
 
-		// --flag value / -f value
-		if rule, known := spec.Flags[lead]; known {
+		// --flag [value] / -f [value]
+		if fs, known := spec.Flags[lead]; known {
+			if !fs.TakesValue {
+				note(i, "switch", SlotNone, true)
+				continue
+			}
+			note(i, "flag", SlotNone, true)
 			if i+1 < len(args) {
-				bind(i+1, rule, lead, a.text(args[i+1]))
+				bind(i+1, fs.Rule, lead, a.text(args[i+1]), "value of "+lead)
 				i++
 			}
 			continue
 		}
 
 		if strings.HasPrefix(lead, "--") {
-			guessed(i+1, lead)
+			gap(i, lead)
 			continue
 		}
 
-		// Clustered short flags (-sH): scan for the first one that takes a
-		// value; everything before it is assumed to be a boolean switch.
+		// A bare count: `head -20`, `tail -5`. Only for commands that declare
+		// they accept one, since elsewhere the digits really would be flags.
+		if spec.NumericFlag && isNumericOption(lead) {
+			note(i, "count", SlotNone, true)
+			continue
+		}
+
+		// Clustered short flags (-sH). Every letter is checked, so an
+		// unrecognised one in the middle of a cluster is still a gap.
 		rest := lead[1:]
-		matched := false
+		note(i, "short flags", SlotNone, true)
+		var unrecognised []string
 		for j := 0; j < len(rest); j++ {
 			flag := "-" + string(rest[j])
-			rule, known := spec.Flags[flag]
+			fs, known := spec.Flags[flag]
 			if !known {
+				scan.gaps = append(scan.gaps, flag)
+				u := &scan.uses[len(scan.uses)-1]
+				u.Known = false
+				unrecognised = append(unrecognised, flag)
+				u.Role = "unrecognised: " + strings.Join(unrecognised, " ")
 				continue
 			}
-			matched = true
+			if !fs.TakesValue {
+				continue
+			}
 			if j+1 < len(rest) {
 				// -d@file : the value is attached to the flag in this word.
-				bind(i, rule, flag, full[2+j:])
+				bind(i, fs.Rule, flag, full[2+j:], "value of "+flag)
 			} else if i+1 < len(args) {
-				bind(i+1, rule, flag, a.text(args[i+1]))
+				bind(i+1, fs.Rule, flag, a.text(args[i+1]), "value of "+flag)
 				i++
 			}
 			break
 		}
-		if !matched {
-			// None of the clustered letters is a flag this spec knows, so
-			// whether one of them takes the next word is a guess. Say so,
-			// rather than letting that word fall through to the positional
-			// slot and be reported with the wrong reason.
-			guessed(i+1, lead)
+	}
+	return scan
+}
+
+// isNumericOption reports whether a short option is a bare count such as -20.
+func isNumericOption(lead string) bool {
+	if len(lead) < 2 {
+		return false
+	}
+	for _, r := range lead[1:] {
+		if r < '0' || r > '9' {
+			return false
 		}
 	}
-	return out
+	return true
 }
 
 // positionalArg is the label used for arguments that are not flag values.
