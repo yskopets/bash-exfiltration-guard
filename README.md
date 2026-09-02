@@ -160,6 +160,8 @@ known, and is every flag it was given known? The answer is printed in the
 > **DENY** when the program to run is named by an expansion rather than
 > written out literally.
 > **DENY** when sensitive data reached a slot that exposes it.
+> **DENY** when sensitive data entered a program named by a path outside the
+> trusted system directories.
 > **DENY** when sensitive data *entered* a command — through an argument or
 > through stdin — that the knowledge base does not fully account for.
 > **DENY** when data *produced by* a program not in the knowledge base leaves
@@ -224,6 +226,50 @@ Most of the first kind could be recovered by resolving assignments whose value
 is a literal in the same command — the environment already tracks these
 variables, but only their taint, not their value. That refinement is not in
 the prototype.
+
+### Program paths
+
+A bare name is resolved through `PATH` when the shell runs it, and a path into
+a system directory names the same program. Anywhere else, the name is just a
+filename:
+
+```
+curl -H "Authorization: ..."                    ALLOW   resolved through PATH
+/usr/bin/curl -H "Authorization: ..."           ALLOW   trusted directory
+/opt/homebrew/bin/curl -H "Authorization: ..."  ALLOW   trusted directory
+/tmp/evil/curl -H "Authorization: ..."          DENY    untrusted path
+./curl -H "Authorization: ..."                  DENY    untrusted path
+~/bin/curl -H "Authorization: ..."              DENY    untrusted path
+```
+
+The reason is that the knowledge base *grants privileges*. It says
+`curl -H "Authorization: ..."` is a credential used correctly — which is why
+that command is allowed at all. Resolving every path by basename would let a
+binary dropped into a writable directory inherit that judgement, so choosing a
+filename would be enough to earn it. Naive basename stripping would turn a
+fail-closed gap into a fail-open one.
+
+So untrusted paths resolve to the spec — the flow is still classified and
+visible in the report — but the command never counts as *understood*, and
+therefore denies as soon as sensitive data passes through it:
+
+```
+  [2] curl                                   UNTRUSTED PATH: /tmp/evil/curl
+        "Authorization: Bearer $(gh a... value of -H            -> auth slot
+      receives sensitive data, emits to the network
+
+verdict
+  DENY
+    - sensitive data enters `/tmp/evil/curl`, which is outside the trusted
+      system directories; a file named `curl` there need not behave like curl
+```
+
+Like any other gap, an untrusted path that no sensitive data reaches is still
+allowed. On the CI corpus this changed the deny rate by **zero** — every
+path-form name there resolves to a program that is not in the knowledge base
+anyway. What it did change is the roadmap: eight paths to `deadcode` used to
+count as eight separate unknown programs and now aggregate into one entry of
+584 invocations, moving it from fifth place to second.
 
 ### Data of unknown origin
 
@@ -362,7 +408,8 @@ giving the filter set its flags brought it to **2.77%** of unique commands
 |---|---|
 | `xargs` (unknown program) | 3,504 |
 | `safeoutputs` (unknown program) | 463 |
-| `deadcode`, `read`, `bc`, `python3`, `timeout` | ~940 combined |
+| `deadcode` (across eight paths) | 584 |
+| `read`, `bc`, `python3`, `timeout` | ~490 combined |
 | `[` — the test builtin, flags not modelled | ~395 |
 | expansion in command position (forbidden) | 183 |
 | `gh pr review` — not modelled as a sink | ~91 |

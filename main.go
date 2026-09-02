@@ -152,6 +152,8 @@ func coverageLabel(u CommandUse) string {
 		return "FORBIDDEN: name from " + u.Computed
 	case !u.Known:
 		return "NOT IN KNOWLEDGE BASE"
+	case u.UntrustedPath != "":
+		return "UNTRUSTED PATH: " + u.UntrustedPath
 	case len(u.Gaps) > 0:
 		return "UNKNOWN FLAGS: " + strings.Join(u.Gaps, " ")
 	}

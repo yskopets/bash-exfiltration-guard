@@ -75,11 +75,20 @@ type CommandUse struct {
 	// name was not written out literally. Such a command is refused outright:
 	// see Decide.
 	Computed string `json:"computed,omitempty"`
+
+	// UntrustedPath is set when the program was named by a path outside the
+	// trusted system directories. The knowledge base still supplies the
+	// spec, so flows are classified and visible -- but the command never
+	// counts as understood, because nothing establishes that this file is
+	// the program its name claims.
+	UntrustedPath string `json:"untrusted_path,omitempty"`
 }
 
 // Understood reports whether the knowledge base accounted for the program and
 // for every flag it was given.
-func (u CommandUse) Understood() bool { return u.Known && len(u.Gaps) == 0 }
+func (u CommandUse) Understood() bool {
+	return u.Known && len(u.Gaps) == 0 && u.UntrustedPath == ""
+}
 
 // Verdict is the allow/deny decision.
 type Verdict string
@@ -120,6 +129,10 @@ type Analyzer struct {
 //     known until the shell runs it. This one is unconditional: it is a
 //     structural prohibition, not a judgement about the data.
 //   - DENY when sensitive data reached a slot that exposes it.
+//   - DENY when sensitive data entered a program named by a path outside the
+//     trusted system directories. A file called `curl` under /tmp need not
+//     behave like curl, and the knowledge base must not be earned by
+//     choosing a filename.
 //   - DENY when sensitive data ENTERED a command -- through an argument or
 //     through stdin -- that the knowledge base does not fully account for.
 //     An unmodelled flag or an unknown program could route that data
@@ -165,12 +178,23 @@ func (a *Analyzer) Decide() (Verdict, []string) {
 		}
 		verdict = Deny
 		if !u.Known {
-			reasons = append(reasons, "sensitive data enters `"+u.Name+
+			where := u.Name
+			if u.UntrustedPath != "" {
+				where = u.UntrustedPath
+			}
+			reasons = append(reasons, "sensitive data enters `"+where+
 				"`, a program not in the knowledge base; where it goes is unknown")
 			continue
 		}
-		reasons = append(reasons, "sensitive data enters `"+u.Name+
-			"`, and the knowledge base does not account for: "+strings.Join(u.Gaps, " "))
+		if u.UntrustedPath != "" {
+			reasons = append(reasons, "sensitive data enters `"+u.UntrustedPath+
+				"`, which is outside the trusted system directories; a file named `"+
+				u.Name+"` there need not behave like "+u.Name)
+		}
+		if len(u.Gaps) > 0 {
+			reasons = append(reasons, "sensitive data enters `"+u.Name+
+				"`, and the knowledge base does not account for: "+strings.Join(u.Gaps, " "))
+		}
 	}
 
 	if verdict == Allow {
@@ -464,13 +488,14 @@ func (a *Analyzer) call(c *syntax.CallExpr, stdin Value) Value {
 	for i, w := range args {
 		leading[i] = a.text(w)
 	}
-	spec, consumed, known := Lookup(name, leading)
+	bin, path, trusted := resolveProgram(name)
+	spec, consumed, known := Lookup(bin, leading)
 	if !known {
-		return a.unknownCommand(c, name, args, stdin)
+		return a.unknownCommand(c, bin, path, trusted, args, stdin)
 	}
 	// Report against the full path that was matched, so a finding reads
 	// "gh issue comment --body" rather than just "gh --body".
-	fullName := strings.TrimSpace(name + " " + strings.Join(leading[:consumed], " "))
+	fullName := strings.TrimSpace(bin + " " + strings.Join(leading[:consumed], " "))
 	args = args[consumed:]
 
 	// Evaluate every argument once, then decide what each one means.
@@ -480,7 +505,7 @@ func (a *Analyzer) call(c *syntax.CallExpr, stdin Value) Value {
 	}
 
 	scan := bindArgs(a, spec, args, values)
-	a.Uses = append(a.Uses, CommandUse{
+	use := CommandUse{
 		Name:     fullName,
 		Span:     a.span(c),
 		Known:    true,
@@ -488,7 +513,11 @@ func (a *Analyzer) call(c *syntax.CallExpr, stdin Value) Value {
 		Gaps:     scan.gaps,
 		Receives: receives(values, stdin),
 		Emits:    spec.Emits,
-	})
+	}
+	if !trusted {
+		use.UntrustedPath = path
+	}
+	a.Uses = append(a.Uses, use)
 
 	out := a.commandOutput(spec, c, args, values, stdin)
 	a.recordSinks(spec, fullName, c, args, values, stdin, scan.bindings)
@@ -646,22 +675,29 @@ func (a *Analyzer) computedName(c *syntax.CallExpr, computed string, stdin Value
 // unknownCommand handles a command the knowledge base has never seen. It is
 // never treated as safe: sensitive input passing through it stays sensitive,
 // and the fact that it was unknown is carried in the Value.
-func (a *Analyzer) unknownCommand(c *syntax.CallExpr, name string, args []*syntax.Word, stdin Value) Value {
+func (a *Analyzer) unknownCommand(c *syntax.CallExpr, bin, path string, trusted bool, args []*syntax.Word, stdin Value) Value {
 	var in Value
 	for _, w := range args {
 		in = union(in, a.word(w))
 	}
 	in = union(in, stdin)
 
-	a.Uses = append(a.Uses, CommandUse{
-		Name:     name,
+	// Reported by program name rather than by the path it was written as, so
+	// that eight paths to the same tool aggregate into one line of work.
+	use := CommandUse{
+		Name:     bin,
 		Span:     a.span(c),
 		Known:    false,
 		Receives: !in.empty(),
-	})
-	out := in.then("passed through unknown command `"+name+"`", a.span(c))
+	}
+	if !trusted {
+		use.UntrustedPath = path
+	}
+	a.Uses = append(a.Uses, use)
+
+	out := in.then("passed through unknown command `"+bin+"`", a.span(c))
 	out.Unknowns = append(out.Unknowns, Unknown{
-		Command: name,
+		Command: bin,
 		Reason:  "not in the knowledge base",
 		Span:    a.span(c),
 	})

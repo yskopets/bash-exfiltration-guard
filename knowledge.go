@@ -420,6 +420,41 @@ var grepFlags = map[string]FlagSpec{
 	"--exclude-dir": takes(SlotNone), "--color": takes(SlotNone), "--colour": takes(SlotNone),
 }
 
+// trustedProgramDirs are the directories where a file named `curl` can be
+// taken to be curl.
+//
+// Everything else -- a relative path, $HOME, /tmp, a build output directory --
+// names a FILE that merely has that name. This matters because the knowledge
+// base grants privileges: it says `curl -H "Authorization: ..."` is a
+// credential used correctly. A binary called `curl` dropped in a writable
+// directory would inherit that judgement, so choosing a filename must not be
+// enough to earn it.
+var trustedProgramDirs = map[string]bool{
+	"/usr/bin":           true,
+	"/bin":               true,
+	"/usr/sbin":          true,
+	"/sbin":              true,
+	"/usr/local/bin":     true,
+	"/usr/local/sbin":    true,
+	"/opt/homebrew/bin":  true,
+	"/opt/homebrew/sbin": true,
+	"/opt/local/bin":     true,
+}
+
+// resolveProgram splits a command name into the program it names, the path it
+// was written as, and whether that path can be trusted to be that program.
+//
+// A bare name is resolved through PATH when the shell runs it. Trusting that
+// is the same assumption every other tool on the machine makes, so a bare name
+// is trusted; a path is trusted only inside a system directory.
+func resolveProgram(name string) (bin, path string, trusted bool) {
+	i := strings.LastIndex(name, "/")
+	if i < 0 {
+		return name, "", true
+	}
+	return name[i+1:], name, trustedProgramDirs[name[:i]]
+}
+
 // Lookup resolves a command name plus its leading arguments to the most
 // specific spec available, so that `gh auth token` and `gh issue view` do not
 // share a verdict.
