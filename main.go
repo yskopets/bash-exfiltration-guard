@@ -183,7 +183,10 @@ func reportFlows(w io.Writer, src string, a *Analyzer) {
 			fmt.Fprintf(w, "        -> %-46s %s\n", s.Desc, place(src, s.Span))
 		}
 		label := "INTENDED USE"
-		if exposingSlot(f.Slot) {
+		switch {
+		case f.Unresolved:
+			label = "UNKNOWN DATA"
+		case exposingSlot(f.Slot):
 			label = "EXPOSED"
 		}
 		fmt.Fprintf(w, "      %s: reaches %s\n", label, f.Emits)
@@ -193,7 +196,7 @@ func reportFlows(w io.Writer, src string, a *Analyzer) {
 
 func hasAuthFinding(a *Analyzer) bool {
 	for _, f := range a.Findings {
-		if f.Slot == SlotAuth {
+		if f.Slot == SlotAuth && !f.Unresolved {
 			return true
 		}
 	}

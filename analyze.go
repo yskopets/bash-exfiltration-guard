@@ -25,6 +25,26 @@ type Finding struct {
 	SlotName string `json:"slot"`
 	Emits    string `json:"emits"` // "the network"
 	Span     Span   `json:"span"`  // the argument word
+
+	// Unresolved marks data whose sensitivity could not be determined,
+	// because it came out of a program the knowledge base does not know.
+	// Such data denies wherever it leaves the machine: the auth exemption is
+	// earned by knowing the value is a credential used correctly, and here
+	// neither half of that is known.
+	Unresolved bool `json:"unresolved,omitempty"`
+}
+
+// sendsRemotely reports whether a slot puts data somewhere off this machine.
+//
+// Unknown provenance denies only for these. Writing the output of an unknown
+// program to a local file is what ordinary commands do all day -- `deadcode
+// ./... > /tmp/out` is not exfiltration -- so the disk slot is excluded.
+func sendsRemotely(s Slot) bool {
+	switch s {
+	case SlotAuth, SlotURL, SlotContent, SlotFile:
+		return true
+	}
+	return false
 }
 
 // ArgUse records how one argument of a command was interpreted, so a report
@@ -108,6 +128,13 @@ func (a *Analyzer) Decide() (Verdict, []string) {
 	verdict := Allow
 
 	for _, f := range a.Findings {
+		if f.Unresolved {
+			verdict = Deny
+			reasons = append(reasons, "output of `"+f.Flow.Origin+
+				"`, which is not in the knowledge base, is sent to "+f.Emits+
+				" via "+f.Command+" "+f.Arg+" ("+f.SlotName+" slot)")
+			continue
+		}
 		if !exposingSlot(f.Slot) {
 			continue
 		}
@@ -133,6 +160,9 @@ func (a *Analyzer) Decide() (Verdict, []string) {
 	if verdict == Allow {
 		reasons = append(reasons, "every command carrying sensitive data is fully accounted for")
 		for _, f := range a.Findings {
+			if f.Unresolved {
+				continue
+			}
 			reasons = append(reasons, "credential used in an "+f.SlotName+
 				" slot of "+f.Command+" "+f.Arg+" -- intended use")
 		}
@@ -445,6 +475,7 @@ func (a *Analyzer) recordSinks(spec *Spec, name string, c *syntax.CallExpr, args
 	// a declared sink silently swallowing a flow, which is worse than an
 	// unknown command.
 	if spec.StdinSlot != SlotNone {
+		a.recordUnresolved(stdin, spec.StdinSlot, name, "stdin", spec.Emits, a.span(c))
 		for _, f := range stdin.Flows {
 			a.Findings = append(a.Findings, Finding{
 				Flow:     f.then("consumed from stdin by "+name+" ("+spec.StdinSlot.String()+" slot)", a.span(c)),
@@ -470,6 +501,7 @@ func (a *Analyzer) recordSinks(spec *Spec, name string, c *syntax.CallExpr, args
 			v = union(v, stdin)
 		}
 
+		a.recordUnresolved(v, b.slot, name, b.flag, spec.Emits, a.span(args[b.index]))
 		for _, f := range v.Flows {
 			a.Findings = append(a.Findings, Finding{
 				Flow:     f.then("used as "+name+" "+b.flag+" ("+b.slot.String()+" slot)", a.span(args[b.index])),
@@ -481,6 +513,40 @@ func (a *Analyzer) recordSinks(spec *Spec, name string, c *syntax.CallExpr, args
 				Span:     a.span(args[b.index]),
 			})
 		}
+	}
+}
+
+// recordUnresolved reports data that reached a sink without the analyzer ever
+// establishing what it was.
+//
+// The value carries no Flow -- nothing identified it as sensitive -- but it
+// came out of a program not in the knowledge base, so nothing established it
+// was harmless either. "We did not look" is not evidence of safety.
+func (a *Analyzer) recordUnresolved(v Value, s Slot, name, arg, emits string, span Span) {
+	if !sendsRemotely(s) || emits == "" {
+		return
+	}
+	seen := map[string]bool{}
+	for _, u := range v.Unknowns {
+		if seen[u.Command] {
+			continue
+		}
+		seen[u.Command] = true
+		a.Findings = append(a.Findings, Finding{
+			Flow: Flow{
+				Origin: u.Command,
+				Why:    "not in the knowledge base, so what it prints could be anything",
+				Span:   u.Span,
+				Steps:  []Step{{Desc: "sent as " + name + " " + arg + " (" + s.String() + " slot)", Span: span}},
+			},
+			Command:    name,
+			Arg:        arg,
+			Slot:       s,
+			SlotName:   s.String(),
+			Emits:      emits,
+			Span:       span,
+			Unresolved: true,
+		})
 	}
 }
 

