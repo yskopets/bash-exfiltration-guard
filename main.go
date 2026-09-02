@@ -148,6 +148,8 @@ func reportCoverage(w io.Writer, a *Analyzer) {
 
 func coverageLabel(u CommandUse) string {
 	switch {
+	case u.Computed != "":
+		return "FORBIDDEN: name from " + u.Computed
 	case !u.Known:
 		return "NOT IN KNOWLEDGE BASE"
 	case len(u.Gaps) > 0:

