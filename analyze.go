@@ -110,6 +110,10 @@ type Note struct {
 type Analyzer struct {
 	src string
 
+	// kb is the loaded knowledge base. Everything the analyzer knows about
+	// the world outside the shell grammar comes from here.
+	kb *KnowledgeBase
+
 	// env maps a variable name to whatever was last assigned to it. This is
 	// a flat, flow-insensitive environment: no branch tracking, no scopes.
 	env map[string]Value
@@ -272,13 +276,14 @@ func receives(values []Value, stdin Value) bool {
 	return false
 }
 
-// Analyze parses a command and maps the flow of sensitive data through it.
-func Analyze(src string) (*Analyzer, error) {
+// Analyze parses a command and maps the flow of sensitive data through it,
+// against the given knowledge base.
+func Analyze(src string, kb *KnowledgeBase) (*Analyzer, error) {
 	file, err := syntax.NewParser().Parse(strings.NewReader(src), "")
 	if err != nil {
 		return nil, err
 	}
-	a := &Analyzer{src: src, env: map[string]Value{}}
+	a := &Analyzer{src: src, kb: kb, env: map[string]Value{}}
 	a.stmts(file.Stmts, Value{})
 	return a, nil
 }
@@ -382,7 +387,7 @@ func (a *Analyzer) outputRedirs(s *syntax.Stmt, out Value) {
 			continue
 		}
 		target := a.text(r.Word)
-		if isDiscard(target) {
+		if a.kb.IsDiscard(target) {
 			continue
 		}
 		for _, f := range out.Flows {
@@ -488,8 +493,8 @@ func (a *Analyzer) call(c *syntax.CallExpr, stdin Value) Value {
 	for i, w := range args {
 		leading[i] = a.text(w)
 	}
-	bin, path, trusted := resolveProgram(name)
-	spec, consumed, known := Lookup(bin, leading)
+	bin, path, trusted := a.kb.ResolveProgram(name)
+	spec, consumed, known := a.kb.Lookup(bin, leading)
 	if !known {
 		return a.unknownCommand(c, bin, path, trusted, args, stdin)
 	}
@@ -718,7 +723,7 @@ func (a *Analyzer) assign(as *syntax.Assign) {
 
 	// A variable named like a secret is treated as a source in its own right,
 	// so `TOKEN=hunter2` is tracked even though the literal is opaque.
-	if v.empty() && secretVarNames.MatchString(name) {
+	if v.empty() && a.kb.SecretVarNames.MatchString(name) {
 		v = Value{Flows: []Flow{{
 			Origin: a.text(as),
 			Why:    "variable is named like a secret (heuristic)",
@@ -757,7 +762,7 @@ func (a *Analyzer) part(p syntax.WordPart) Value {
 
 	case *syntax.Lit:
 		// A bare path that names a credential file is a source.
-		if secretPaths.MatchString(x.Value) {
+		if a.kb.SecretPaths.MatchString(x.Value) {
 			return Value{Flows: []Flow{{
 				Origin: x.Value,
 				Why:    "path names a credential file (heuristic)",
@@ -769,7 +774,7 @@ func (a *Analyzer) part(p syntax.WordPart) Value {
 	case *syntax.SglQuoted:
 		// Single quotes suppress every expansion, so there is nothing to
 		// trace; the literal itself is still checked.
-		if secretPaths.MatchString(x.Value) {
+		if a.kb.SecretPaths.MatchString(x.Value) {
 			return Value{Flows: []Flow{{
 				Origin: x.Value,
 				Why:    "path names a credential file (heuristic)",
@@ -817,7 +822,7 @@ func (a *Analyzer) paramExp(x *syntax.ParamExp) Value {
 		return v.then("expanded as $"+name, a.span(x))
 	}
 	// Not assigned in this command, so it comes from the ambient environment.
-	if secretVarNames.MatchString(name) {
+	if a.kb.SecretVarNames.MatchString(name) {
 		return Value{Flows: []Flow{{
 			Origin: "$" + name,
 			Why:    "environment variable named like a secret (heuristic)",

@@ -12,9 +12,20 @@ type analyzed struct {
 	a *Analyzer
 }
 
+// testKB is the built-in knowledge base, loaded once. Every test runs against
+// the same base the binary ships with, so a mistake in knowledge.yaml shows up
+// here rather than only in production.
+var testKB = func() *KnowledgeBase {
+	kb, err := LoadBuiltinKnowledge()
+	if err != nil {
+		panic("built-in knowledge base does not load: " + err.Error())
+	}
+	return kb
+}()
+
 func run(t *testing.T, src string) analyzed {
 	t.Helper()
-	a, err := Analyze(src)
+	a, err := Analyze(src, testKB)
 	if err != nil {
 		t.Fatalf("parse %q: %v", src, err)
 	}
@@ -607,7 +618,7 @@ func TestBenignCommandHasNoFindings(t *testing.T) {
 
 // A command that cannot be parsed must fail loudly, not report "no flows".
 func TestUnparsableCommandIsAnError(t *testing.T) {
-	if _, err := Analyze(`curl -H "unterminated`); err == nil {
+	if _, err := Analyze(`curl -H "unterminated`, testKB); err == nil {
 		t.Fatalf("expected a parse error, got none")
 	}
 }

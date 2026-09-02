@@ -1,0 +1,400 @@
+# The knowledge base: everything guard knows about specific programs.
+#
+# The engine is generic. It walks the AST and asks this file two questions --
+# "does this command produce sensitive data?" and "does this argument slot
+# expose it?" -- and knows nothing else about curl or gh. Adding a command is
+# an edit here, not to the code.
+#
+# What is NOT here, deliberately: which slots exist, which of them count as
+# exposure, and what the allow/deny rules are. This file says `curl -H` is an
+# auth slot; it does not say what an auth slot means. That stays in Go, so the
+# verdict itself is not user-editable.
+#
+# Two ways to break this file silently, both of which the loader rejects:
+#
+#   * A misspelled key. `swithces:` would leave a command with no switches
+#     declared, and every one it uses would become a gap that denies.
+#   * A value-taking flag written as a switch. It would consume no word, and
+#     the following argument would be read as a positional -- so `curl -o
+#     "$TOKEN" https://x` would report the token as a URL.
+#
+# Arity is therefore structural: switches and value-taking flags are separate
+# keys, and a flag may not appear in both.
+
+version: 1
+
+# Parsed and ignored. Exists so YAML aliases have somewhere to be defined.
+anchors:
+  grep-switches: &grep-switches
+    [-i, --ignore-case, -v, --invert-match, -n, --line-number,
+     -c, --count, -l, --files-with-matches, -L, --files-without-match,
+     -o, --only-matching, -q, --quiet, -s, --no-messages,
+     -w, --word-regexp, -x, --line-regexp, -F, --fixed-strings,
+     -E, --extended-regexp, -G, -P, --perl-regexp,
+     -r, -R, --recursive, -a, -h, -H, -z, -U]
+
+  grep-flags: &grep-flags
+    -e: none
+    --regexp: none
+    -f: none
+    --file: none
+    -m: none
+    --max-count: none
+    -A: none
+    --after-context: none
+    -B: none
+    --before-context: none
+    -C: none
+    --context: none
+    --include: none
+    --exclude: none
+    --exclude-dir: none
+    --color: none
+    --colour: none
+
+# Named regexes, referenced by `when:` in a flag rule.
+patterns:
+  # The HTTP headers whose whole purpose is to carry a credential. Anything
+  # else in a -H is a channel for arbitrary data.
+  auth-header: '(?i)^[''"]?\s*(authorization|proxy-authorization|cookie|x-api-key|api-key|x-auth-token|private-token)\s*:'
+
+# The two signals that need no per-command knowledge. Both are heuristics, and
+# the report labels findings from them as such.
+heuristics:
+  secret-paths: '(?i)(\.ssh/|id_rsa|id_ed25519|id_ecdsa|\.aws/credentials|\.aws/config|\.config/gh/hosts\.ya?ml|\.npmrc|\.netrc|\.pgpass|\.git-credentials|(^|/)\.env(\.|$)|\.pem$|\.p12$|\.key$|kubeconfig|\.kube/config|\.docker/config\.json|service[-_]account.*\.json|credentials\.json)'
+  secret-var-names: '(?i)(TOKEN|SECRET|PASSWORD|PASSWD|PASSPHRASE|API_?KEY|ACCESS_?KEY|PRIVATE_?KEY|_KEY$|CREDENTIAL|AUTH|SESSION|COOKIE)'
+
+# Where a file named `curl` may be taken to be curl. Anywhere else the name is
+# just a filename, and the knowledge base must not be earned by choosing one.
+trusted-program-dirs:
+  - /usr/bin
+  - /bin
+  - /usr/sbin
+  - /sbin
+  - /usr/local/bin
+  - /usr/local/sbin
+  - /opt/homebrew/bin
+  - /opt/homebrew/sbin
+  - /opt/local/bin
+
+# Redirect targets that throw data away rather than store it. `2>/dev/null` is
+# common enough that treating it as a leak drowns every real finding.
+discard-targets:
+  - /dev/null
+  - /dev/zero
+
+commands:
+
+  # ----------------------------------------------------------- producers
+
+  env:
+    produces: prints every environment variable, including exported secrets
+  printenv:
+    produces: prints environment variables, including exported secrets
+
+  cat:
+    reads-files: true
+    switches: [-n, -b, -e, -s, -t, -v, -A, -E, -T]
+
+  head:
+    reads-files: true
+    passes-stdin: true
+    numeric-flag: true
+    switches: [-q, --quiet, -v, --verbose]
+    flags: {-n: none, --lines: none, -c: none, --bytes: none}
+
+  tail:
+    reads-files: true
+    passes-stdin: true
+    numeric-flag: true
+    switches: [-f, --follow, -F, -q, --quiet, -v, --verbose]
+    flags: {-n: none, --lines: none, -c: none, --bytes: none}
+
+  echo:
+    prints-args: true
+  printf:
+    prints-args: true
+
+  # ---------------------------------------------------------- transforms
+  #
+  # Encoding a secret does not make it stop being a secret, so these pass the
+  # flow straight through.
+
+  base64:
+    passes-stdin: true
+    reads-files: true
+    switches: [-d, --decode, -i, --ignore-garbage]
+    flags: {-w: none, --wrap: none}
+
+  gzip:
+    passes-stdin: true
+    reads-files: true
+
+  tr:
+    passes-stdin: true
+    switches: [-d, --delete, -s, -c, -t]
+
+  xxd:
+    passes-stdin: true
+    reads-files: true
+
+  jq:
+    passes-stdin: true
+    reads-files: true
+    switches: [-r, --raw-output, -c, --compact-output, -n, --null-input,
+               -s, --slurp, -e, --exit-status, -j, -a, -R, --raw-input,
+               -S, --sort-keys, --tab, -M, -C]
+    flags:
+      --arg: none
+      --argjson: none
+      --slurpfile: none
+      --rawfile: none
+      --indent: none
+      -f: none
+      --from-file: none
+
+  # -------------------------------------------------------------- filters
+  #
+  # These select or reshape their input and emit the selected data, so a
+  # secret survives them -- `cat ~/.ssh/id_rsa | grep PRIVATE` still carries
+  # the key. Without these entries every pipeline cascades unknown-command
+  # notes and buries the real ones.
+
+  grep:
+    passes-stdin: true
+    reads-files: true
+    numeric-flag: true
+    switches: *grep-switches
+    flags: *grep-flags
+
+  egrep:
+    passes-stdin: true
+    reads-files: true
+    numeric-flag: true
+    switches: *grep-switches
+    flags: *grep-flags
+
+  rg:
+    passes-stdin: true
+    reads-files: true
+    switches: *grep-switches
+    flags: *grep-flags
+
+  sort:
+    passes-stdin: true
+    reads-files: true
+    switches: [-r, --reverse, -n, --numeric-sort, -u, --unique,
+               -f, -b, -h, -V, -c, -s, -z, -g, -M, -R]
+    flags:
+      -k: none
+      --key: none
+      -t: none
+      --field-separator: none
+      -T: none
+      -S: none
+      # `sort -o FILE` writes its output to a file rather than to stdout.
+      -o: disk
+      --output: disk
+
+  uniq:
+    passes-stdin: true
+    reads-files: true
+    switches: [-c, --count, -d, -u, -i, -z]
+    flags: {-f: none, -s: none, -w: none}
+
+  cut:
+    passes-stdin: true
+    reads-files: true
+    switches: [-s, --only-delimited, -z]
+    flags:
+      -d: none
+      --delimiter: none
+      -f: none
+      --fields: none
+      -c: none
+      --characters: none
+      -b: none
+      --bytes: none
+
+  # `sed -i` is deliberately absent: it is a switch on GNU sed and takes a
+  # suffix on BSD sed. An ambiguous arity is a genuine gap, and leaving it out
+  # means it denies rather than being guessed at.
+  sed:
+    passes-stdin: true
+    reads-files: true
+    switches: [-n, --quiet, --silent, -E, -r, --regexp-extended, -s, -z, -u]
+    flags: {-e: none, --expression: none, -f: none, --file: none}
+
+  awk:
+    passes-stdin: true
+    reads-files: true
+    flags: {-F: none, -v: none, -f: none, --file: none}
+
+  comm:
+    reads-files: true
+    switches: [-1, -2, -3, -i, -z]
+
+  rev:
+    passes-stdin: true
+
+  # ------------------------------------------------------------ reducers
+  #
+  # Known commands whose output does not carry their input on. `wc` turns data
+  # into a count, `ls` prints names rather than contents, `[` yields only an
+  # exit status.
+  #
+  # Listing them stops a flow, which is a deliberate fail-open: a length or
+  # existence oracle (`printenv GH_TOKEN | wc -c`) is a real but much weaker
+  # leak, and treating it as one drowns the report.
+
+  wc:
+    switches: [-l, --lines, -w, --words, -c, --bytes, -m, --chars,
+               -L, --max-line-length]
+
+  ls:
+    numeric-flag: true
+    switches: [-l, -a, -A, -h, -R, -t, -r, -S, -1, -d, -F, -i, -n, -p, -u]
+    flags: {--color: none, --time-style: none}
+
+  "[": {}
+  test: {}
+  "true": {}
+  "false": {}
+
+  # ------------------------------------------------------ secret sources
+
+  gh:
+    subcommands:
+      auth:
+        subcommands:
+          token:
+            produces: prints the GitHub CLI's stored OAuth token
+      issue:
+        subcommands:
+          comment:
+            emits: a public GitHub comment
+            switches: [--edit-last]
+            flags:
+              --body: content
+              -b: content
+              --body-file: file
+              -F: file
+              -R: none
+              --repo: none
+      pr:
+        subcommands:
+          comment:
+            emits: a public GitHub comment
+            switches: [--edit-last]
+            flags:
+              --body: content
+              -b: content
+              --body-file: file
+              -R: none
+              --repo: none
+
+  aws:
+    subcommands:
+      configure:
+        subcommands:
+          get:
+            produces: prints a stored AWS credential
+
+  security:
+    subcommands:
+      find-generic-password:
+        produces: prints a macOS keychain secret
+      find-internet-password:
+        produces: prints a macOS keychain secret
+
+  op:
+    subcommands:
+      read:
+        produces: prints a 1Password secret
+
+  # ---------------------------------------------------------------- sinks
+
+  curl:
+    emits: the network
+    positional: url
+    # Declaring switches is what lets an ordinary invocation come out fully
+    # understood: an undeclared flag is a gap, and a gap denies as soon as
+    # data flows through the command.
+    switches: [-s, --silent, -S, --show-error, -f, --fail, -L, --location,
+               -i, --include, -I, --head, -k, --insecure, -v, --verbose,
+               -g, --globoff, -N, --no-buffer, --compressed,
+               --fail-with-body, --no-progress-meter, --location-trusted]
+    flags:
+      # Credential slots.
+      -H: {slot: auth, when: auth-header, else: content}
+      --header: {slot: auth, when: auth-header, else: content}
+      -u: auth
+      --user: auth
+      -b: auth
+      --cookie: auth
+      --oauth2-bearer: auth
+
+      # Payload slots.
+      -d: content
+      --data: content
+      --data-raw: content
+      --data-binary: content
+      --data-urlencode: content
+      -F: content
+      --form: content
+      -T: file
+      --upload-file: file
+
+      # Value-taking flags that carry nothing outward. Listed so their value
+      # is consumed rather than mistaken for the URL.
+      -o: none
+      --output: none
+      -X: none
+      --request: none
+      -A: none
+      --user-agent: none
+      -e: none
+      --referer: none
+      -w: none
+      --write-out: none
+      -m: none
+      --max-time: none
+      --connect-timeout: none
+      --retry: none
+      -D: none
+      --dump-header: none
+      -x: none
+      --proxy: none
+
+  wget:
+    emits: the network
+    positional: url
+    switches: [-q, --quiet]
+    flags:
+      --header: {slot: auth, when: auth-header, else: content}
+      --post-data: content
+      --body-data: content
+      --post-file: file
+      --body-file: file
+      -O: none
+      --output-file: none
+
+  nc:
+    emits: a raw network socket
+    stdin-slot: content
+
+  tee:
+    emits: disk
+    positional: disk
+    stdin-slot: disk
+
+  git:
+    subcommands:
+      # `git push https://user:$TOKEN@host` puts a credential in a URL that
+      # git records in its own config and exposes in the process list.
+      push:
+        emits: a remote git host
+        positional: url
+      clone:
+        emits: a remote git host
+        positional: url

@@ -5,12 +5,17 @@ import (
 	"strings"
 )
 
-// This file is the only place that knows anything about specific programs.
-// The analyzer in analyze.go is generic: it walks the AST and asks this table
-// two questions -- "does this command produce sensitive data?" and "does this
-// argument slot expose it?" -- and knows nothing else about curl or gh.
+// The shape of what the analyzer knows about specific programs.
 //
-// Extending the prototype to a new command is an edit here, not there.
+// The data itself lives in knowledge.yaml, loaded by knowledge_load.go. This
+// file holds only the types and the lookups, so that the engine in analyze.go
+// stays generic: it walks the AST and asks two questions -- "does this command
+// produce sensitive data?" and "does this argument slot expose it?" -- and
+// knows nothing else about curl or gh.
+//
+// What deliberately stays here rather than in the YAML: which slots exist and
+// what they mean. The knowledge base says `curl -H` is an auth slot; it does
+// not get to say what an auth slot implies for the verdict.
 
 // Slot is where a command argument lands. The slot matters far more than the
 // fact that a secret is present: a token in an Authorization header is the
@@ -27,6 +32,8 @@ const (
 	SlotDisk
 )
 
+// slotInfo is the single list of slot names. The YAML loader resolves names
+// against it and the report prints from it, so the two cannot drift apart.
 var slotInfo = map[Slot]struct{ Name, Desc string }{
 	SlotNone:    {"none", "does not carry data outward"},
 	SlotAuth:    {"auth", "authenticates the request -- this is what a credential is for"},
@@ -52,6 +59,14 @@ type SlotRule struct {
 
 func slot(s Slot) SlotRule { return SlotRule{Slot: s} }
 
+// resolve picks the slot for a concrete argument.
+func (r SlotRule) resolve(arg string) Slot {
+	if r.When != nil && !r.When.MatchString(arg) {
+		return r.Else
+	}
+	return r.Slot
+}
+
 // FlagSpec says whether a flag consumes the following word, and where that
 // value lands.
 //
@@ -64,33 +79,6 @@ type FlagSpec struct {
 	TakesValue bool
 	Rule       SlotRule
 }
-
-// noValue is a boolean switch: it consumes no following word.
-var noValue = FlagSpec{}
-
-// takes declares a flag whose value lands in a fixed slot.
-func takes(s Slot) FlagSpec { return FlagSpec{TakesValue: true, Rule: slot(s)} }
-
-// takesIf declares a flag whose slot depends on the value it is handed.
-func takesIf(when *regexp.Regexp, then, otherwise Slot) FlagSpec {
-	return FlagSpec{TakesValue: true, Rule: slotIf(when, then, otherwise)}
-}
-
-func slotIf(when *regexp.Regexp, then, otherwise Slot) SlotRule {
-	return SlotRule{Slot: then, When: when, Else: otherwise}
-}
-
-// resolve picks the slot for a concrete argument.
-func (r SlotRule) resolve(arg string) Slot {
-	if r.When != nil && !r.When.MatchString(arg) {
-		return r.Else
-	}
-	return r.Slot
-}
-
-// authHeader names the HTTP headers whose whole purpose is to carry a
-// credential. Anything else in a -H is a channel for arbitrary data.
-var authHeader = regexp.MustCompile(`(?i)^['"]?\s*(authorization|proxy-authorization|cookie|x-api-key|api-key|x-auth-token|private-token)\s*:`)
 
 // Spec describes one command, or one subcommand path such as "gh auth token".
 type Spec struct {
@@ -120,9 +108,9 @@ type Spec struct {
 	// The string names the destination.
 	Emits string
 
-	// Flags maps a flag that takes a value to the slot that value lands in.
-	// A flag absent from this map is assumed to be a boolean switch -- see
-	// bindArgs in analyze.go, where that assumption is recorded as a note.
+	// Flags maps a flag to its arity and slot. A flag absent from this map is
+	// unknown in both respects, and Decide turns that into a denial as soon
+	// as sensitive data passes through the command.
 	Flags map[string]FlagSpec
 
 	// NumericFlag marks a command that accepts a bare count as a short option
@@ -138,321 +126,32 @@ type Spec struct {
 	Subcommands map[string]*Spec
 }
 
-// commands is the knowledge base. It is deliberately small: this is a
-// prototype, and a command that is absent is reported as unknown rather than
-// guessed at.
-var commands = map[string]*Spec{
-	// ---------------------------------------------------------- producers
-	"env":      {Produces: "prints every environment variable, including exported secrets"},
-	"printenv": {Produces: "prints environment variables, including exported secrets"},
+// KnowledgeBase is one loaded knowledge base. Everything the analyzer knows
+// about the world outside the shell grammar comes from here, so that swapping
+// the file swaps the policy and nothing else.
+type KnowledgeBase struct {
+	// Source says where this base came from -- "built-in" or a file path --
+	// so that "which knowledge base produced this verdict" is answerable
+	// from the report alone.
+	Source string
 
-	"cat": {ReadsFiles: true, Flags: map[string]FlagSpec{
-		"-n": noValue, "-b": noValue, "-e": noValue, "-s": noValue,
-		"-t": noValue, "-v": noValue, "-A": noValue, "-E": noValue, "-T": noValue,
-	}},
-	"head": {ReadsFiles: true, PassesStdin: true, NumericFlag: true, Flags: map[string]FlagSpec{
-		"-n": takes(SlotNone), "--lines": takes(SlotNone),
-		"-c": takes(SlotNone), "--bytes": takes(SlotNone),
-		"-q": noValue, "--quiet": noValue, "-v": noValue, "--verbose": noValue,
-	}},
-	"tail": {ReadsFiles: true, PassesStdin: true, NumericFlag: true, Flags: map[string]FlagSpec{
-		"-n": takes(SlotNone), "--lines": takes(SlotNone),
-		"-c": takes(SlotNone), "--bytes": takes(SlotNone),
-		"-f": noValue, "--follow": noValue, "-F": noValue,
-		"-q": noValue, "--quiet": noValue, "-v": noValue, "--verbose": noValue,
-	}},
+	Commands map[string]*Spec
 
-	"echo":   {PrintsArgs: true},
-	"printf": {PrintsArgs: true},
+	// The two command-independent signals. Both are heuristics, and findings
+	// derived from them are labelled as such.
+	SecretPaths    *regexp.Regexp
+	SecretVarNames *regexp.Regexp
 
-	// Transforms. Encoding a secret does not make it stop being a secret, so
-	// these pass the flow straight through.
-	"base64": {PassesStdin: true, ReadsFiles: true, Flags: map[string]FlagSpec{
-		"-d": noValue, "--decode": noValue, "-i": noValue, "--ignore-garbage": noValue,
-		"-w": takes(SlotNone), "--wrap": takes(SlotNone),
-	}},
-	"gzip": {PassesStdin: true, ReadsFiles: true},
-	"tr": {PassesStdin: true, Flags: map[string]FlagSpec{
-		"-d": noValue, "--delete": noValue, "-s": noValue, "-c": noValue, "-t": noValue,
-	}},
-	"xxd": {PassesStdin: true, ReadsFiles: true},
-	"jq": {PassesStdin: true, ReadsFiles: true, Flags: map[string]FlagSpec{
-		"-r": noValue, "--raw-output": noValue, "-c": noValue, "--compact-output": noValue,
-		"-n": noValue, "--null-input": noValue, "-s": noValue, "--slurp": noValue,
-		"-e": noValue, "--exit-status": noValue, "-j": noValue, "-a": noValue,
-		"-R": noValue, "--raw-input": noValue, "-S": noValue, "--sort-keys": noValue,
-		"--tab": noValue, "-M": noValue, "-C": noValue,
-		"--arg": takes(SlotNone), "--argjson": takes(SlotNone),
-		"--slurpfile": takes(SlotNone), "--rawfile": takes(SlotNone),
-		"--indent": takes(SlotNone), "-f": takes(SlotNone), "--from-file": takes(SlotNone),
-	}},
+	// TrustedProgramDirs are the directories where a file named `curl` can be
+	// taken to be curl. Everything else names a FILE that merely has that
+	// name. This matters because the knowledge base grants privileges: it
+	// says `curl -H "Authorization: ..."` is a credential used correctly. A
+	// binary called `curl` dropped in a writable directory would inherit that
+	// judgement, so choosing a filename must not be enough to earn it.
+	TrustedProgramDirs map[string]bool
 
-	// The standard filter set. These select or reshape their input and emit
-	// the selected data, so a secret survives them -- `cat ~/.ssh/id_rsa |
-	// grep PRIVATE` still carries the key. Without these entries every
-	// pipeline cascades "unknown command" notes and buries the real ones.
-	"grep":  {PassesStdin: true, ReadsFiles: true, NumericFlag: true, Flags: grepFlags},
-	"egrep": {PassesStdin: true, ReadsFiles: true, NumericFlag: true, Flags: grepFlags},
-	"rg":    {PassesStdin: true, ReadsFiles: true, Flags: grepFlags},
-	"sort": {PassesStdin: true, ReadsFiles: true, Flags: map[string]FlagSpec{
-		"-r": noValue, "--reverse": noValue, "-n": noValue, "--numeric-sort": noValue,
-		"-u": noValue, "--unique": noValue, "-f": noValue, "-b": noValue,
-		"-h": noValue, "-V": noValue, "-c": noValue, "-s": noValue, "-z": noValue,
-		"-g": noValue, "-M": noValue, "-R": noValue,
-		"-k": takes(SlotNone), "--key": takes(SlotNone),
-		"-t": takes(SlotNone), "--field-separator": takes(SlotNone),
-		"-T": takes(SlotNone), "-S": takes(SlotNone),
-		// `sort -o FILE` writes its output to a file rather than to stdout.
-		"-o": takes(SlotDisk), "--output": takes(SlotDisk),
-	}},
-	"uniq": {PassesStdin: true, ReadsFiles: true, Flags: map[string]FlagSpec{
-		"-c": noValue, "--count": noValue, "-d": noValue, "-u": noValue,
-		"-i": noValue, "-z": noValue,
-		"-f": takes(SlotNone), "-s": takes(SlotNone), "-w": takes(SlotNone),
-	}},
-	"cut": {PassesStdin: true, ReadsFiles: true, Flags: map[string]FlagSpec{
-		"-d": takes(SlotNone), "--delimiter": takes(SlotNone),
-		"-f": takes(SlotNone), "--fields": takes(SlotNone),
-		"-c": takes(SlotNone), "--characters": takes(SlotNone),
-		"-b": takes(SlotNone), "--bytes": takes(SlotNone),
-		"-s": noValue, "--only-delimited": noValue, "-z": noValue,
-	}},
-	// `sed -i` is deliberately absent: it is a switch on GNU sed and takes a
-	// suffix on BSD sed. An ambiguous arity is a genuine gap, and leaving it
-	// out means it denies rather than being guessed at.
-	"sed": {PassesStdin: true, ReadsFiles: true, Flags: map[string]FlagSpec{
-		"-n": noValue, "--quiet": noValue, "--silent": noValue,
-		"-E": noValue, "-r": noValue, "--regexp-extended": noValue,
-		"-s": noValue, "-z": noValue, "-u": noValue,
-		"-e": takes(SlotNone), "--expression": takes(SlotNone),
-		"-f": takes(SlotNone), "--file": takes(SlotNone),
-	}},
-	"awk": {PassesStdin: true, ReadsFiles: true, Flags: map[string]FlagSpec{
-		"-F": takes(SlotNone), "-v": takes(SlotNone),
-		"-f": takes(SlotNone), "--file": takes(SlotNone),
-	}},
-	"comm": {ReadsFiles: true, Flags: map[string]FlagSpec{
-		"-1": noValue, "-2": noValue, "-3": noValue, "-i": noValue, "-z": noValue,
-	}},
-	"rev": {PassesStdin: true},
-
-	// Reducers: known commands whose output does not carry their input on.
-	// `wc` turns data into a count, `ls` prints names rather than contents,
-	// and `[` yields only an exit status.
-	//
-	// Listing them stops a flow, which is a deliberate fail-open: a length
-	// or existence oracle (`printenv GH_TOKEN | wc -c`) is a real but much
-	// weaker leak, and treating it as one drowns the report. Side channels
-	// of this kind are out of scope for the prototype.
-	"wc": {Flags: map[string]FlagSpec{
-		"-l": noValue, "--lines": noValue, "-w": noValue, "--words": noValue,
-		"-c": noValue, "--bytes": noValue, "-m": noValue, "--chars": noValue,
-		"-L": noValue, "--max-line-length": noValue,
-	}},
-	"ls": {NumericFlag: true, Flags: map[string]FlagSpec{
-		"-l": noValue, "-a": noValue, "-A": noValue, "-h": noValue, "-R": noValue,
-		"-t": noValue, "-r": noValue, "-S": noValue, "-1": noValue, "-d": noValue,
-		"-F": noValue, "-i": noValue, "-n": noValue, "-p": noValue, "-u": noValue,
-		"--color": takes(SlotNone), "--time-style": takes(SlotNone),
-	}},
-	"[":     {},
-	"test":  {},
-	"true":  {},
-	"false": {},
-
-	"gh": {Subcommands: map[string]*Spec{
-		"auth": {Subcommands: map[string]*Spec{
-			"token": {Produces: "prints the GitHub CLI's stored OAuth token"},
-		}},
-		"issue": {Subcommands: map[string]*Spec{
-			"comment": {
-				Emits: "a public GitHub comment",
-				Flags: map[string]FlagSpec{
-					"--body":      takes(SlotContent),
-					"-b":          takes(SlotContent),
-					"--body-file": takes(SlotFile),
-					"-F":          takes(SlotFile),
-					"-R":          takes(SlotNone), "--repo": takes(SlotNone),
-					"--edit-last": noValue,
-				},
-			},
-		}},
-		"pr": {Subcommands: map[string]*Spec{
-			"comment": {
-				Emits: "a public GitHub comment",
-				Flags: map[string]FlagSpec{
-					"--body":      takes(SlotContent),
-					"-b":          takes(SlotContent),
-					"--body-file": takes(SlotFile),
-					"-R":          takes(SlotNone), "--repo": takes(SlotNone),
-					"--edit-last": noValue,
-				},
-			},
-		}},
-	}},
-
-	"aws": {Subcommands: map[string]*Spec{
-		"configure": {Subcommands: map[string]*Spec{
-			"get": {Produces: "prints a stored AWS credential"},
-		}},
-	}},
-
-	"security": {Subcommands: map[string]*Spec{
-		"find-generic-password":  {Produces: "prints a macOS keychain secret"},
-		"find-internet-password": {Produces: "prints a macOS keychain secret"},
-	}},
-
-	"op": {Subcommands: map[string]*Spec{
-		"read": {Produces: "prints a 1Password secret"},
-	}},
-
-	// ------------------------------------------------------------- sinks
-	"curl": {
-		Emits: "the network",
-		Flags: map[string]FlagSpec{
-			// Credential slots.
-			"-H":              takesIf(authHeader, SlotAuth, SlotContent),
-			"--header":        takesIf(authHeader, SlotAuth, SlotContent),
-			"-u":              takes(SlotAuth),
-			"--user":          takes(SlotAuth),
-			"-b":              takes(SlotAuth),
-			"--cookie":        takes(SlotAuth),
-			"--oauth2-bearer": takes(SlotAuth),
-
-			// Payload slots.
-			"-d":               takes(SlotContent),
-			"--data":           takes(SlotContent),
-			"--data-raw":       takes(SlotContent),
-			"--data-binary":    takes(SlotContent),
-			"--data-urlencode": takes(SlotContent),
-			"-F":               takes(SlotContent),
-			"--form":           takes(SlotContent),
-			"-T":               takes(SlotFile),
-			"--upload-file":    takes(SlotFile),
-
-			// Value-taking flags that carry nothing outward. They are listed
-			// so their value is consumed rather than mistaken for the URL.
-			"-o": takes(SlotNone), "--output": takes(SlotNone),
-			"-X": takes(SlotNone), "--request": takes(SlotNone),
-			"-A": takes(SlotNone), "--user-agent": takes(SlotNone),
-			"-e": takes(SlotNone), "--referer": takes(SlotNone),
-			"-w": takes(SlotNone), "--write-out": takes(SlotNone),
-			"-m": takes(SlotNone), "--max-time": takes(SlotNone),
-			"--connect-timeout": takes(SlotNone),
-			"--retry":           takes(SlotNone),
-			"-D":                takes(SlotNone), "--dump-header": takes(SlotNone),
-			"-x": takes(SlotNone), "--proxy": takes(SlotNone),
-
-			// Switches. Declaring these is what lets an ordinary invocation
-			// come out fully understood: an undeclared flag is a gap, and a
-			// gap denies as soon as data flows through the command.
-			"-s": noValue, "--silent": noValue,
-			"-S": noValue, "--show-error": noValue,
-			"-f": noValue, "--fail": noValue,
-			"-L": noValue, "--location": noValue,
-			"-i": noValue, "--include": noValue,
-			"-I": noValue, "--head": noValue,
-			"-k": noValue, "--insecure": noValue,
-			"-v": noValue, "--verbose": noValue,
-			"-g": noValue, "--globoff": noValue,
-			"-N": noValue, "--no-buffer": noValue,
-			"--compressed":        noValue,
-			"--fail-with-body":    noValue,
-			"--no-progress-meter": noValue,
-			"--location-trusted":  noValue,
-		},
-		Positional: SlotURL,
-	},
-
-	"wget": {
-		Emits: "the network",
-		Flags: map[string]FlagSpec{
-			"--header":      takesIf(authHeader, SlotAuth, SlotContent),
-			"--post-data":   takes(SlotContent),
-			"--body-data":   takes(SlotContent),
-			"--post-file":   takes(SlotFile),
-			"--body-file":   takes(SlotFile),
-			"-O":            takes(SlotNone),
-			"--output-file": takes(SlotNone),
-			"-q":            noValue, "--quiet": noValue,
-		},
-		Positional: SlotURL,
-	},
-
-	"nc": {Emits: "a raw network socket", StdinSlot: SlotContent},
-
-	"tee": {Emits: "disk", Positional: SlotDisk, StdinSlot: SlotDisk},
-
-	"git": {Subcommands: map[string]*Spec{
-		// `git push https://user:$TOKEN@host` puts a credential in a URL that
-		// git records in its own config and exposes in the process list.
-		"push":  {Emits: "a remote git host", Positional: SlotURL},
-		"clone": {Emits: "a remote git host", Positional: SlotURL},
-	}},
-}
-
-// grepFlags is shared by the grep family. None of these carries data outward;
-// `-e` and `-f` supply patterns, and the rest select or format matches.
-var grepFlags = map[string]FlagSpec{
-	"-i": noValue, "--ignore-case": noValue,
-	"-v": noValue, "--invert-match": noValue,
-	"-n": noValue, "--line-number": noValue,
-	"-c": noValue, "--count": noValue,
-	"-l": noValue, "--files-with-matches": noValue,
-	"-L": noValue, "--files-without-match": noValue,
-	"-o": noValue, "--only-matching": noValue,
-	"-q": noValue, "--quiet": noValue,
-	"-s": noValue, "--no-messages": noValue,
-	"-w": noValue, "--word-regexp": noValue,
-	"-x": noValue, "--line-regexp": noValue,
-	"-F": noValue, "--fixed-strings": noValue,
-	"-E": noValue, "--extended-regexp": noValue,
-	"-G": noValue, "-P": noValue, "--perl-regexp": noValue,
-	"-r": noValue, "-R": noValue, "--recursive": noValue,
-	"-a": noValue, "-h": noValue, "-H": noValue, "-z": noValue, "-U": noValue,
-	"-e": takes(SlotNone), "--regexp": takes(SlotNone),
-	"-f": takes(SlotNone), "--file": takes(SlotNone),
-	"-m": takes(SlotNone), "--max-count": takes(SlotNone),
-	"-A": takes(SlotNone), "--after-context": takes(SlotNone),
-	"-B": takes(SlotNone), "--before-context": takes(SlotNone),
-	"-C": takes(SlotNone), "--context": takes(SlotNone),
-	"--include": takes(SlotNone), "--exclude": takes(SlotNone),
-	"--exclude-dir": takes(SlotNone), "--color": takes(SlotNone), "--colour": takes(SlotNone),
-}
-
-// trustedProgramDirs are the directories where a file named `curl` can be
-// taken to be curl.
-//
-// Everything else -- a relative path, $HOME, /tmp, a build output directory --
-// names a FILE that merely has that name. This matters because the knowledge
-// base grants privileges: it says `curl -H "Authorization: ..."` is a
-// credential used correctly. A binary called `curl` dropped in a writable
-// directory would inherit that judgement, so choosing a filename must not be
-// enough to earn it.
-var trustedProgramDirs = map[string]bool{
-	"/usr/bin":           true,
-	"/bin":               true,
-	"/usr/sbin":          true,
-	"/sbin":              true,
-	"/usr/local/bin":     true,
-	"/usr/local/sbin":    true,
-	"/opt/homebrew/bin":  true,
-	"/opt/homebrew/sbin": true,
-	"/opt/local/bin":     true,
-}
-
-// resolveProgram splits a command name into the program it names, the path it
-// was written as, and whether that path can be trusted to be that program.
-//
-// A bare name is resolved through PATH when the shell runs it. Trusting that
-// is the same assumption every other tool on the machine makes, so a bare name
-// is trusted; a path is trusted only inside a system directory.
-func resolveProgram(name string) (bin, path string, trusted bool) {
-	i := strings.LastIndex(name, "/")
-	if i < 0 {
-		return name, "", true
-	}
-	return name[i+1:], name, trustedProgramDirs[name[:i]]
+	// DiscardTargets are redirect targets that throw their input away.
+	DiscardTargets map[string]bool
 }
 
 // Lookup resolves a command name plus its leading arguments to the most
@@ -461,8 +160,8 @@ func resolveProgram(name string) (bin, path string, trusted bool) {
 //
 // It returns the matched spec, the number of argument words consumed by the
 // subcommand path, and whether the base command was known at all.
-func Lookup(name string, args []string) (spec *Spec, consumed int, known bool) {
-	spec, known = commands[name]
+func (kb *KnowledgeBase) Lookup(name string, args []string) (spec *Spec, consumed int, known bool) {
+	spec, known = kb.Commands[name]
 	if !known {
 		return nil, 0, false
 	}
@@ -479,37 +178,23 @@ func Lookup(name string, args []string) (spec *Spec, consumed int, known bool) {
 	return spec, consumed, true
 }
 
-// isDiscard reports whether a redirect target throws its input away. Writing
-// a secret to /dev/null is not a leak, and `2>/dev/null` is so common that
-// treating it as one drowns every real finding.
-func isDiscard(target string) bool {
-	switch strings.Trim(target, `"'`) {
-	case "/dev/null", "/dev/zero":
-		return true
+// ResolveProgram splits a command name into the program it names, the path it
+// was written as, and whether that path can be trusted to be that program.
+//
+// A bare name is resolved through PATH when the shell runs it. Trusting that
+// is the same assumption every other tool on the machine makes, so a bare name
+// is trusted; a path is trusted only inside a system directory.
+func (kb *KnowledgeBase) ResolveProgram(name string) (bin, path string, trusted bool) {
+	i := strings.LastIndex(name, "/")
+	if i < 0 {
+		return name, "", true
 	}
-	return false
+	return name[i+1:], name, kb.TrustedProgramDirs[name[:i]]
 }
 
-// ------------------------------------------------------------ heuristics
-//
-// Two cheap signals that need no per-command knowledge: a path that names a
-// credential file, and a variable named like a secret. Both are heuristics,
-// and the report labels them as such.
-
-var secretPaths = regexp.MustCompile(`(?i)(` +
-	`\.ssh/|id_rsa|id_ed25519|id_ecdsa|` +
-	`\.aws/credentials|\.aws/config|` +
-	`\.config/gh/hosts\.ya?ml|` +
-	`\.npmrc|\.netrc|\.pgpass|\.git-credentials|` +
-	`(^|/)\.env(\.|$)|` +
-	`\.pem$|\.p12$|\.key$|` +
-	`kubeconfig|\.kube/config|` +
-	`\.docker/config\.json|` +
-	`service[-_]account.*\.json|credentials\.json` +
-	`)`)
-
-var secretVarNames = regexp.MustCompile(`(?i)(` +
-	`TOKEN|SECRET|PASSWORD|PASSWD|PASSPHRASE|` +
-	`API_?KEY|ACCESS_?KEY|PRIVATE_?KEY|_KEY$|` +
-	`CREDENTIAL|AUTH|SESSION|COOKIE` +
-	`)`)
+// IsDiscard reports whether a redirect target throws its input away. Writing a
+// secret to /dev/null is not a leak, and `2>/dev/null` is so common that
+// treating it as one drowns every real finding.
+func (kb *KnowledgeBase) IsDiscard(target string) bool {
+	return kb.DiscardTargets[strings.Trim(target, `"'`)]
+}

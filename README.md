@@ -37,15 +37,17 @@ verdict
 ```bash
 go build -o guard .
 
-./guard '<bash command>'          # human-readable report
-./guard -json '<bash command>'    # coverage, flow graph and verdict as JSON
-./guard -q '<bash command>'       # verdict through the exit code only
-echo '<bash command>' | ./guard   # read from stdin
+./guard '<bash command>'              # human-readable report
+./guard -json '<bash command>'        # coverage, flow graph and verdict as JSON
+./guard -q '<bash command>'           # verdict through the exit code only
+./guard -kb ./knowledge.yaml '<cmd>'  # use a different knowledge base
+./guard -check                        # validate a knowledge base and stop
+echo '<bash command>' | ./guard       # read from stdin
 
 # exit codes are the interface for a policy gate
 #   0  ALLOW
 #   1  DENY  -- including a command that cannot be parsed
-#   2  usage error
+#   2  usage error, or a knowledge base that will not load
 
 go test ./...                     # the test suite
 ./probes/run.sh                   # re-run the parser comparison below
@@ -94,6 +96,60 @@ printer, both useful for future expansion.
 The one real cost: the analyzer must be written in Go. That is fine here, and
 the design keeps all program-specific knowledge in a data table, so the
 knowledge base is portable even if the engine is not.
+
+## The knowledge base
+
+Everything the tool knows about specific programs lives in
+[`knowledge.yaml`](knowledge.yaml) — which commands produce credentials, which
+flags take values, and which slot each value lands in. It is embedded in the
+binary by default; `-kb FILE` replaces it wholesale. There is no merging, so
+"which knowledge base produced this verdict" has exactly one answer, and every
+report names it.
+
+```yaml
+commands:
+  curl:
+    emits: the network
+    positional: url
+
+    # arity 0 - consumes no following word
+    switches: [-s, --silent, -L, --location, -k, -v]
+
+    # arity 1 - flag -> the slot its value lands in
+    flags:
+      -H: {slot: auth, when: auth-header, else: content}
+      -d: content
+      -T: file
+      -o: none        # takes a value that carries nothing outward
+```
+
+**Arity is structural.** Switches and value-taking flags are separate keys,
+and a flag may not appear in both. That makes the dangerous typo impossible to
+write: declaring `-o` as arity-0 would leave its value to be read as a
+positional, so `curl -o "$TOKEN" https://x` would report the token as a URL.
+
+**What is not in the file:** which slots exist, what they mean, and what
+denies. The base says `curl -H` is an auth slot; it does not say what an auth
+slot implies. Verdict policy stays in Go, so swapping the base cannot rewrite
+the rules — only what the rules are applied to.
+
+**Loading is strict, because a knowledge base is a security artifact.** An
+entry that goes missing turns into a denial or, worse, into a value landing in
+the wrong slot. So an unrecognised key is an error rather than a silent no-op
+— a typo'd `swithces:` would otherwise leave a command with no switches and
+deny everything that used one — and so are an unknown slot name, a `when:`
+naming an undeclared pattern, a regex that does not compile, and a flag
+declared as both a switch and value-taking. There is no partial base: either
+the whole file is valid or the tool refuses to run, exiting `2` so a broken
+base can never be mistaken for a denied command.
+
+```
+$ ./guard -check
+knowledge base built-in
+  37 commands, 13 subcommands
+  149 value-taking flags, 251 switches
+  9 trusted program dirs, 2 discard targets
+```
 
 ## How it works
 
@@ -450,9 +506,12 @@ than one that has none.
   regime this is the most consequential gap, so the verdict prints it as a
   caveat rather than leaving it implicit. Host allowlisting would be the next
   layer.
-- **Flag tables are hand-written and partial.** curl has 258 flags; the table
+- **Flag tables are hand-written and partial.** curl has 258 flags; the base
   declares the ones that matter plus the common switches. Arity for a full
-  table would be generated from `--help` or shell completions, not typed out.
+  table would be generated from `--help` or shell completions and written into
+  the YAML, not typed out.
+- **One knowledge base at a time.** `-kb` replaces rather than layers. A site
+  base over a built-in default is the obvious next step.
 - **No value computation.** The analyzer knows a word carries a credential; it
   never knows which one, and cannot tell `https://api.github.com` from
   `https://evil.com`. Destination allowlisting would be a separate layer.
@@ -477,6 +536,9 @@ than one that has none.
 | `main.go` | CLI and report rendering |
 | `analyze.go` | the AST walk that builds the flow graph |
 | `value.go` | what "data" means: `Flow`, `Step`, `Value` |
-| `knowledge.go` | the command table and slot rules — the only program-specific knowledge |
+| `knowledge.yaml` | **the knowledge base** — the only program-specific knowledge |
+| `knowledge.go` | slot definitions, the `Spec`/`FlagSpec` types, and lookups |
+| `knowledge_load.go` | loading and validating a knowledge base |
 | `analyze_test.go` | flow traces asserted hop by hop |
+| `knowledge_load_test.go` | one test per way of writing an invalid base |
 | `probes/` | the parser comparison, reproducible via `run.sh` |

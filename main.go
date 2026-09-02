@@ -15,12 +15,17 @@ import (
 //	guard '<command>'
 //	echo '<command>' | guard
 //	guard -json '<command>'
+//	guard -kb ./knowledge.yaml '<command>'
+//	guard -check                          validate a knowledge base and stop
 //
 // Exit codes are the interface for a policy gate:
 //
 //	0  ALLOW
 //	1  DENY   -- including a command that cannot be parsed
-//	2  usage error
+//	2  usage error, or a knowledge base that will not load
+//
+// A broken knowledge base exits 2 rather than 1, so that it can never be
+// mistaken for a denied command.
 //
 // It is a prototype. It reports what it can trace and says plainly what it
 // cannot, and everything it could not account for is visible in the output
@@ -37,12 +42,25 @@ const (
 func main() {
 	jsonOut := flag.Bool("json", false, "emit the flow graph, coverage and verdict as JSON")
 	quiet := flag.Bool("q", false, "print nothing; communicate the verdict through the exit code")
+	kbPath := flag.String("kb", "", "knowledge base to use instead of the built-in one")
+	check := flag.Bool("check", false, "validate the knowledge base, print a summary and stop")
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "usage: guard [-json] [-q] '<bash command>'\n\n")
-		fmt.Fprintf(os.Stderr, "exit: 0 allow, 1 deny, 2 usage error\n\n")
+		fmt.Fprintf(os.Stderr, "usage: guard [-json] [-q] [-kb FILE] '<bash command>'\n")
+		fmt.Fprintf(os.Stderr, "       guard -check [-kb FILE]\n\n")
+		fmt.Fprintf(os.Stderr, "exit: 0 allow, 1 deny, 2 usage error or unloadable knowledge base\n\n")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
+
+	kb, err := loadKnowledge(*kbPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(2)
+	}
+	if *check {
+		fmt.Println(kb.Summary())
+		return
+	}
 
 	src := strings.Join(flag.Args(), " ")
 	if strings.TrimSpace(src) == "" {
@@ -55,7 +73,7 @@ func main() {
 	}
 	src = strings.TrimRight(src, "\n")
 
-	a, err := Analyze(src)
+	a, err := Analyze(src, kb)
 	if err != nil {
 		// A command that cannot be parsed has unknown data flow, and unknown
 		// is never an allow.
@@ -73,12 +91,13 @@ func main() {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
 		_ = enc.Encode(map[string]any{
-			"command":  src,
-			"verdict":  verdict,
-			"reasons":  reasons,
-			"commands": a.Uses,
-			"findings": a.Findings,
-			"notes":    a.Notes,
+			"command":        src,
+			"knowledge_base": kb.Source,
+			"verdict":        verdict,
+			"reasons":        reasons,
+			"commands":       a.Uses,
+			"findings":       a.Findings,
+			"notes":          a.Notes,
 		})
 	default:
 		report(os.Stdout, src, a, verdict, reasons)
@@ -87,6 +106,16 @@ func main() {
 	if verdict == Deny {
 		os.Exit(1)
 	}
+}
+
+// loadKnowledge picks the knowledge base: the file named by -kb, or the one
+// compiled into the binary. There is no merging -- the base that loads is the
+// whole policy.
+func loadKnowledge(path string) (*KnowledgeBase, error) {
+	if path != "" {
+		return LoadKnowledgeFile(path)
+	}
+	return LoadBuiltinKnowledge()
 }
 
 func report(w io.Writer, src string, a *Analyzer, verdict Verdict, reasons []string) {
@@ -103,6 +132,7 @@ func report(w io.Writer, src string, a *Analyzer, verdict Verdict, reasons []str
 	}
 
 	fmt.Fprintf(w, "verdict\n  %s\n", verdict)
+	fmt.Fprintf(w, "    (knowledge base: %s)\n", a.kb.Source)
 	for _, r := range reasons {
 		fmt.Fprintf(w, "    - %s\n", r)
 	}
