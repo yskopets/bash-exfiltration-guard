@@ -40,6 +40,7 @@ make test             # the suite, under the race detector
 make test-cover       # statement coverage across all packages
 make test-bench       # time and allocations, see Performance below
 make check            # go vet, and fail on anything unformatted
+make dev.run          # run the HTTP server from source, no build step
 
 ./guard assess '<bash command>'        # human-readable report
 ./guard assess --json '<bash command>' # the same assessment the HTTP API returns

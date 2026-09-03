@@ -7,6 +7,7 @@ BINARY := guard
 CMD    := ./cmd/guard
 PKGS   := ./...
 COVER  := coverage.out
+ADDR   ?= 127.0.0.1:8080
 
 IMAGE     ?= guard
 TAG       ?= dev
@@ -23,7 +24,7 @@ OCI       := guard-oci.tar
 DOCKER_OUTPUT ?= --output=type=oci,dest=$(OCI)
 
 .DEFAULT_GOAL := help
-.PHONY: help build test test-bench test-cover check clean docker docker-local
+.PHONY: help build test test-bench test-cover check clean docker docker-local dev.run
 
 ## help:       list the targets
 help:
@@ -63,6 +64,18 @@ test-cover:
 check:
 	go vet $(PKGS)
 	@test -z "$$(gofmt -l . )" || { echo "unformatted:"; gofmt -l .; exit 1; }
+
+## dev.run:    run the HTTP server from source, with no build step
+#
+# Loopback by default, unlike the container image: on a host there is no
+# network namespace to be the boundary, so the server should not be reachable
+# from off the machine.
+#
+#   make dev.run
+#   make dev.run ADDR=127.0.0.1:9000
+#   GUARD_KB=./my-knowledge.yaml make dev.run
+dev.run:
+	go run $(CMD) serve --addr $(ADDR)
 
 ## docker:     build the multi-arch distroless image
 #
