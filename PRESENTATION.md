@@ -68,6 +68,27 @@ each get denied once the sensitive data is involved.
 A known command with unmodelled flags that doesn't involve sensitive data is still allowed.
 E.g., `ls -lah --color=auto` is allowed even though all four flags are outside the knowledge base.
 
+## Components
+
+**Parser** — [`mvdan.cc/sh`](https://github.com/mvdan/sh), picked by running four
+candidates against the same corpus. It is the only one that parses every construct
+*and* fails loudly on input it cannot, rather than recovering silently. Typed AST
+with byte offsets, so every finding points back at the text it came from.
+It parsed 99.79% of the 129,915 real commands.
+
+**Knowledge base** — a YAML data file, not code. Which commands produce credentials
+(`gh auth token`), which flags take a value, and which slot that value lands in.
+37 commands. Swapping the file swaps the policy.
+
+**Analyzer** — walks the AST in source order, carrying variable bindings. A word
+evaluates not to a string but to the set of sensitive flows it carries, so `$TOKEN`
+resolves by node lookup rather than by regex over text. A finding is recorded when
+a flow reaches a slot that exposes it.
+
+Which slots exist, which count as exposure, and the allow/deny rules stay in code.
+The knowledge base says `curl -H` is an auth slot; it does not get to say what an
+auth slot means.
+
 ## Scope
 
 The prototype implementation has been tested on 129,915 unique commands captured from real Claude Code sessions in the CI environment:
