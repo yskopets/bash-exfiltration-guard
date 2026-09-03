@@ -12,6 +12,19 @@ import (
 	"guard/pkg/server"
 )
 
+// defaultAddr picks the address to listen on when --addr is not given.
+//
+// A managed runtime -- Cloud Run, Heroku, Fly -- injects PORT and requires the
+// container to listen on it and on all interfaces. Everywhere else the default
+// stays loopback, because on a host there is no network namespace to be the
+// boundary and this server is unauthenticated.
+func defaultAddr() string {
+	if port := os.Getenv("PORT"); port != "" {
+		return ":" + port
+	}
+	return "127.0.0.1:8080"
+}
+
 // newServeCmd builds `guard serve`.
 func newServeCmd(kbPath *string) *cobra.Command {
 	var (
@@ -59,7 +72,7 @@ func newServeCmd(kbPath *string) *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVar(&addr, "addr", "127.0.0.1:8080", "address to listen on")
+	cmd.Flags().StringVar(&addr, "addr", defaultAddr(), "address to listen on [$PORT]")
 
 	// Defaults from GUARD_UI for the same reason --kb does from GUARD_KB:
 	// explicit arguments replace a Docker CMD wholesale, so a flag baked into

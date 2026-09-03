@@ -61,12 +61,15 @@ COPY --from=ui /pkg/ui/dist /srv/guard/ui
 ENV GUARD_KB=/etc/guard/knowledge.yaml \
     GUARD_UI=/srv/guard/ui
 
+# Cloud Run and friends override this with their own PORT. Set here so that a
+# plain `docker run` still binds a reachable interface rather than loopback.
+ENV PORT=8080
+
 EXPOSE 8080
 
 # `docker run guard` serves; `docker run guard assess '<cmd>'` assesses.
 #
-# --addr :8080 rather than the CLI's loopback default: inside a container
-# loopback is unreachable from outside it, and the network namespace is the
-# boundary that the loopback default provides on a host.
+# --addr is deliberately absent: an explicit flag would beat $PORT, and a
+# managed runtime requires the container to listen on the port it injects.
 ENTRYPOINT ["/usr/local/bin/guard"]
-CMD ["serve", "--addr", ":8080"]
+CMD ["serve"]
