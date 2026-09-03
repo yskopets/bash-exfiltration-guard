@@ -166,9 +166,9 @@ func (a *Analyzer) Decide() (Verdict, []string) {
 			continue
 		}
 		verdict = Deny
-		if f.Slot == SlotStdout {
-			reasons = append(reasons, "sensitive data is printed to stdout, where "+
-				"the caller reads it -- and when the caller is an agent, that is the model")
+		if f.Slot == SlotOutput {
+			reasons = append(reasons, "sensitive data is printed where the caller "+
+				"reads it -- and when the caller is an agent, that is the model")
 			continue
 		}
 		reasons = append(reasons, "sensitive data reaches "+f.Emits+
@@ -538,7 +538,7 @@ func (a *Analyzer) call(c *syntax.CallExpr, stdin Value) Value {
 	a.Uses = append(a.Uses, use)
 
 	out := a.commandOutput(spec, c, args, values, stdin)
-	a.recordSinks(spec, fullName, c, args, values, stdin, scan.bindings)
+	a.recordSinks(spec, fullName, c, args, values, stdin, scan)
 	return out
 }
 
@@ -575,7 +575,7 @@ func (a *Analyzer) commandOutput(spec *Spec, c *syntax.CallExpr, args []*syntax.
 
 // recordSinks binds arguments to slots and records every sensitive value that
 // landed somewhere it is exposed.
-func (a *Analyzer) recordSinks(spec *Spec, name string, c *syntax.CallExpr, args []*syntax.Word, values []Value, stdin Value, bindings []binding) {
+func (a *Analyzer) recordSinks(spec *Spec, name string, c *syntax.CallExpr, args []*syntax.Word, values []Value, stdin Value, scan argScan) {
 	if spec.Emits == "" {
 		return
 	}
@@ -600,7 +600,25 @@ func (a *Analyzer) recordSinks(spec *Spec, name string, c *syntax.CallExpr, args
 		}
 	}
 
-	for _, b := range bindings {
+	// A flag like `curl -v` prints the request it was handed. Everything that
+	// entered the command therefore reaches the caller, including a
+	// credential sitting in the Authorization header where it belongs.
+	if scan.reflects != "" {
+		reflected := union(append(append([]Value{}, values...), stdin)...)
+		for _, f := range reflected.Flows {
+			a.Findings = append(a.Findings, Finding{
+				Flow:     f.then(StepSink, "echoed to stderr by "+name+" "+scan.reflects, a.span(c)),
+				Command:  name,
+				Arg:      scan.reflects,
+				Slot:     SlotOutput,
+				SlotName: SlotOutput.String(),
+				Emits:    "the caller, which for an agent means the model",
+				Span:     a.span(c),
+			})
+		}
+	}
+
+	for _, b := range scan.bindings {
 		if b.slot == SlotNone {
 			continue
 		}
@@ -642,11 +660,11 @@ func (a *Analyzer) recordSinks(spec *Spec, name string, c *syntax.CallExpr, args
 func (a *Analyzer) toTerminal(v Value, span Span) {
 	for _, f := range v.Flows {
 		a.Findings = append(a.Findings, Finding{
-			Flow:     f.then(StepSink, "printed to stdout with nothing to catch it", span),
+			Flow:     f.then(StepSink, "printed with nothing to catch it", span),
 			Command:  "stdout",
 			Arg:      "stdout",
-			Slot:     SlotStdout,
-			SlotName: SlotStdout.String(),
+			Slot:     SlotOutput,
+			SlotName: SlotOutput.String(),
 			Emits:    "the caller, which for an agent means the model",
 			Span:     span,
 		})
@@ -908,6 +926,10 @@ type argScan struct {
 	bindings []binding
 	uses     []ArgUse
 	gaps     []string
+
+	// reflects names a flag that makes this command echo its inputs to
+	// stderr, when one was given.
+	reflects string
 }
 
 // bindArgs walks a command's arguments, assigning each value to a slot and
@@ -958,6 +980,14 @@ func bindArgs(a *Analyzer, spec *Spec, args []*syntax.Word, values []Value) argS
 		note(i, "unrecognised flag", SlotNone, false)
 	}
 
+	// seen records a flag that turns the command into a printer of its own
+	// inputs, whichever shape it was written in.
+	seen := func(flag string) {
+		if spec.Reflects[flag] && scan.reflects == "" {
+			scan.reflects = flag
+		}
+	}
+
 	for i := 0; i < len(args); i++ {
 		lead := leadingLit(a, args[i])
 		full := a.text(args[i])
@@ -982,6 +1012,7 @@ func bindArgs(a *Analyzer, spec *Spec, args []*syntax.Word, values []Value) argS
 
 		// --flag [value] / -f [value]
 		if fs, known := spec.Flags[lead]; known {
+			seen(lead)
 			if !fs.TakesValue {
 				note(i, "switch", SlotNone, true)
 				continue
@@ -1031,6 +1062,7 @@ func bindArgs(a *Analyzer, spec *Spec, args []*syntax.Word, values []Value) argS
 				u.Role = "unrecognised: " + strings.Join(unrecognised, " ")
 				continue
 			}
+			seen(flag)
 			if !fs.TakesValue {
 				continue
 			}

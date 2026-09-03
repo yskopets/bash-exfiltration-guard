@@ -324,6 +324,17 @@ commands:
                -i, --include, -I, --head, -k, --insecure, -v, --verbose,
                -g, --globoff, -N, --no-buffer, --compressed,
                --fail-with-body, --no-progress-meter, --location-trusted]
+
+    # `-v` prints the request headers curl was handed, straight to stderr. A
+    # credential in an Authorization header is correct use of that header --
+    # and is echoed back to the caller anyway.
+    #
+    # --trace and --trace-ascii are deliberately absent rather than listed:
+    # they are not declared at all, so they are gaps, and a gap denies as soon
+    # as data flows through the command. Declaring them would mean deciding
+    # whether their FILE argument is stderr, which depends on the argument.
+    reflects-to-stderr: [-v, --verbose]
+
     flags:
       # Credential slots.
       -H: {slot: auth, when: auth-header, else: content}
@@ -369,7 +380,8 @@ commands:
   wget:
     emits: the network
     positional: url
-    switches: [-q, --quiet]
+    switches: [-q, --quiet, -d, --debug]
+    reflects-to-stderr: [-d, --debug]
     flags:
       --header: {slot: auth, when: auth-header, else: content}
       --post-data: content

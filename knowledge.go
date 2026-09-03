@@ -30,7 +30,7 @@ const (
 	SlotContent
 	SlotFile
 	SlotDisk
-	SlotStdout
+	SlotOutput
 )
 
 // slotInfo is the single list of slot names. The YAML loader resolves names
@@ -42,7 +42,7 @@ var slotInfo = map[Slot]struct{ Name, Desc string }{
 	SlotContent: {"content", "transmitted to the remote host as the request payload"},
 	SlotFile:    {"file", "the file's contents are uploaded"},
 	SlotDisk:    {"disk", "written to a file on disk"},
-	SlotStdout:  {"stdout", "printed where the caller reads it -- and when the caller is an agent, that is the model"},
+	SlotOutput:  {"output", "printed on stdout or stderr, where the caller reads it -- and when the caller is an agent, that is the model"},
 }
 
 func (s Slot) String() string { return slotInfo[s].Name }
@@ -114,6 +114,15 @@ type Spec struct {
 	// unknown in both respects, and Decide turns that into a denial as soon
 	// as sensitive data passes through the command.
 	Flags map[string]FlagSpec
+
+	// Reflects holds the flags that make this command echo what it was given
+	// to stderr. `curl -v` prints the request headers it was handed, so a
+	// credential in an Authorization header -- correct use of that header --
+	// is printed straight back to the caller.
+	//
+	// This is a property of the flag, not of the data: the command turns
+	// into a printer of its own inputs.
+	Reflects map[string]bool
 
 	// NumericFlag marks a command that accepts a bare count as a short option
 	// -- `head -20`, `tail -5`, `grep -3`. Without this the digits are read

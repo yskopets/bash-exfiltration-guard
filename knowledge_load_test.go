@@ -114,6 +114,21 @@ func TestFlagWithoutSlotIsRefused(t *testing.T) {
 		"curl", "-d", "slot")
 }
 
+// A reflecting flag must be declared, so that its arity is known and a typo
+// cannot silently do nothing.
+func TestReflectsMustNameADeclaredFlag(t *testing.T) {
+	loadFails(t, strings.Replace(minimal, "switches: [-s]",
+		"switches: [-s]\n    reflects-to-stderr: [-v]", 1),
+		"curl", "-v", "reflects-to-stderr")
+
+	kb := loadOK(t, strings.Replace(minimal, "switches: [-s]",
+		"switches: [-s, -v]\n    reflects-to-stderr: [-v]", 1))
+	spec, _, _ := kb.Lookup("curl", nil)
+	if !spec.Reflects["-v"] {
+		t.Errorf("-v was not recorded as reflecting: %+v", spec.Reflects)
+	}
+}
+
 func TestWrongVersionIsRefused(t *testing.T) {
 	loadFails(t, strings.Replace(minimal, "version: 1", "version: 2", 1), "version")
 }

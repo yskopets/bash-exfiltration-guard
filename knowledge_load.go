@@ -53,6 +53,7 @@ type yamlCommand struct {
 	NumericFlag bool                    `yaml:"numeric-flag"`
 	Positional  string                  `yaml:"positional"`
 	Switches    []string                `yaml:"switches"`
+	Reflects    []string                `yaml:"reflects-to-stderr"`
 	Flags       map[string]*yamlFlag    `yaml:"flags"`
 	Subcommands map[string]*yamlCommand `yaml:"subcommands"`
 }
@@ -217,6 +218,18 @@ func buildSpec(yc *yamlCommand, patterns map[string]*regexp.Regexp, path string)
 			return nil, err
 		}
 		spec.Flags[name] = fs
+	}
+
+	// A reflecting flag must also be declared, so its arity is known. Naming
+	// one that does not exist is a typo that would otherwise do nothing.
+	for _, f := range yc.Reflects {
+		if _, declared := spec.Flags[f]; !declared {
+			return nil, fmt.Errorf("%s: reflects-to-stderr names %s, which is not declared as a switch or a flag", path, f)
+		}
+		if spec.Reflects == nil {
+			spec.Reflects = map[string]bool{}
+		}
+		spec.Reflects[f] = true
 	}
 
 	if len(yc.Subcommands) > 0 {
