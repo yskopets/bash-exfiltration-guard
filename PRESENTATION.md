@@ -109,3 +109,8 @@ via either the UI or the API.
   * DENY a single Bash tool use that is assessed as exfiltration
     by taking into account the entire sequence of preceding commands
   * include the inferred data flow as a data point into the classification request
+
+## Time breakdown
+
+* `~3h` on the prototype of the data flow analyzer
+* extra time on UI for the demo

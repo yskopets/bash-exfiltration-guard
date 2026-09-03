@@ -71,6 +71,21 @@ func (f *yamlFlag) UnmarshalYAML(n *yaml.Node) error {
 		f.Slot = n.Value
 		return nil
 	}
+	// Node.Decode builds a fresh decoder with default settings, so the
+	// KnownFields(true) that Parse sets does not reach inside a custom
+	// UnmarshalYAML. Checking the keys by hand is what keeps the guarantee
+	// stated at the top of knowledge.yaml true for the one place the file
+	// uses a nested mapping: `els:` for `else:` would otherwise load
+	// silently, leaving Else as SlotNone -- inert -- and turning a deny
+	// into an allow while `config check` called the base valid.
+	for i := 0; i < len(n.Content); i += 2 {
+		switch key := n.Content[i].Value; key {
+		case "slot", "when", "else":
+		default:
+			return fmt.Errorf("unknown field %q (want slot, when or else)", key)
+		}
+	}
+
 	type raw yamlFlag // avoid recursing back into this method
 	var r raw
 	if err := n.Decode(&r); err != nil {
@@ -182,6 +197,14 @@ func requiredPattern(field, expr string) (*regexp.Regexp, error) {
 // buildSpec converts one command entry, recursing through subcommands. path is
 // the command path so far ("gh issue comment"), used in error messages.
 func buildSpec(yc *yamlCommand, patterns map[string]*regexp.Regexp, path string) (*Spec, error) {
+	// `commands:\n  curl:` is valid YAML and a natural thing to write while
+	// sketching an entry, and it decodes to a nil pointer. Say which entry is
+	// empty rather than panicking into a stack trace that reads like a bug in
+	// the tool.
+	if yc == nil {
+		return nil, fmt.Errorf("%s: entry is empty", path)
+	}
+
 	spec := &Spec{
 		Produces:    yc.Produces,
 		ReadsFiles:  yc.ReadsFiles,
@@ -248,6 +271,10 @@ func buildSpec(yc *yamlCommand, patterns map[string]*regexp.Regexp, path string)
 }
 
 func buildFlag(yf *yamlFlag, patterns map[string]*regexp.Regexp, path string) (FlagSpec, error) {
+	if yf == nil {
+		return FlagSpec{}, fmt.Errorf("%s: entry is empty (write it as a switch if it takes no value)", path)
+	}
+
 	if yf.Slot == "" {
 		return FlagSpec{}, fmt.Errorf("%s: slot is required (write it as a switch if it takes no value)", path)
 	}
@@ -263,6 +290,14 @@ func buildFlag(yf *yamlFlag, patterns map[string]*regexp.Regexp, path string) (F
 			return FlagSpec{}, fmt.Errorf("%s: when: %q is not declared under patterns", path, yf.When)
 		}
 		rule.When = re
+
+		// A conditional rule that names no else leaves the branch that does
+		// NOT match -- an arbitrary, attacker-chosen value -- defaulting to
+		// SlotNone, the safest slot there is. Everywhere else in this tool
+		// missing knowledge denies, so requiring else keeps that true here.
+		if yf.Else == "" {
+			return FlagSpec{}, fmt.Errorf("%s: when needs an else, naming the slot for a value that does not match", path)
+		}
 		if rule.Else, err = parseSlot(yf.Else, path+": else"); err != nil {
 			return FlagSpec{}, err
 		}

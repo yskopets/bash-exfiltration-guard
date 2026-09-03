@@ -362,10 +362,13 @@ commands:
       --output: none
       -X: none
       --request: none
-      -A: none
-      --user-agent: none
-      -e: none
-      --referer: none
+      # `curl --help all`: "-A, --user-agent <name>  Send User-Agent <name>
+      # to server", and -e sets the Referer: request header. Both land
+      # exactly where a non-auth -H lands, so they carry the same slot.
+      -A: content
+      --user-agent: content
+      -e: content
+      --referer: content
       -w: none
       --write-out: none
       -m: none
@@ -374,8 +377,11 @@ commands:
       --retry: none
       -D: none
       --dump-header: none
-      -x: none
-      --proxy: none
+      # A proxy URL may embed user:password, and it is contacted and appears
+      # in the process list -- the same shape as `git push
+      # https://user:$TOKEN@host`, which the url slot exists for.
+      -x: url
+      --proxy: url
 
   wget:
     emits: the network

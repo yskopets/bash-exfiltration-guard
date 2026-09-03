@@ -161,3 +161,36 @@ func TestBuiltinBaseIsValid(t *testing.T) {
 		t.Errorf("summary looks wrong: %s", s)
 	}
 }
+
+// ------------------------------------------- validation gaps found by review
+
+// KnownFields(true) does not reach inside a custom UnmarshalYAML, so the one
+// place the file uses a nested mapping had no typo check at all. `els:` for
+// `else:` loaded silently, left Else inert, and turned a deny into an allow
+// while `config check` called the base valid.
+func TestUnknownKeyInsideAFlagRuleIsRefused(t *testing.T) {
+	loadFails(t, strings.Replace(minimal,
+		"else: content", "els: content", 1),
+		"els")
+}
+
+// A conditional rule that names no else leaves the branch that does NOT match
+// -- an arbitrary, attacker-chosen value -- defaulting to the safest slot.
+// Everywhere else in this tool missing knowledge denies.
+func TestWhenWithoutElseIsRefused(t *testing.T) {
+	loadFails(t, strings.Replace(minimal,
+		"{slot: auth, when: auth-header, else: content}",
+		"{slot: auth, when: auth-header}", 1),
+		"when", "else")
+}
+
+// `commands:\n  curl:` is valid YAML that decodes to a nil pointer. It used to
+// panic into a stack trace that read like a bug in the tool rather than an
+// empty entry in the file.
+func TestEmptyEntriesAreRefusedNotPanics(t *testing.T) {
+	head := strings.Split(minimal, "commands:")[0]
+
+	loadFails(t, head+"commands:\n  curl:\n", "curl", "empty")
+	loadFails(t, head+"commands:\n  gh:\n    subcommands:\n      auth:\n", "auth", "empty")
+	loadFails(t, head+"commands:\n  curl:\n    flags:\n      -d:\n", "-d", "empty")
+}
