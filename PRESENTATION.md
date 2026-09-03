@@ -96,7 +96,7 @@ Deliberately out of scope:
 
 ## Trying it out
 
-Use the demo instance of the tool deployed at TODO.
+Use the demo instance of the tool deployed at https://bash-exfiltration-guard.onrender.com.
 
 The demo instance allows you to explore the data flow analyzer
 via either the UI or the API.
