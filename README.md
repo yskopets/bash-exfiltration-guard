@@ -455,7 +455,9 @@ Two parameter expansions are excluded because they never yield the value they
 name: `${#VAR}` is a length, and `${VAR:+yes}` substitutes a fixed word. Both
 are how you probe for a credential *without* printing one, and flagging them
 would flag careful code for being careful. `${VAR:-fallback}` still counts,
-because it can expand to the value.
+because it can expand to the value — and so does the fallback word itself:
+`${NOPE:-$(gh auth token)}` supplies a credential, which is an ordinary way to
+write one.
 
 ### Input and output are separate
 

