@@ -258,7 +258,20 @@ func buildGraph(flows []FlowView) GraphView {
 	edgeSeen := map[string]bool{}
 
 	node := func(kind, label string, span analyze.Span, slot, emits string) string {
+		// A variable is a storage location, so every mention of `$X` is the
+		// same node however many times it appears -- that is the convergence
+		// this graph exists to show. Everything else is a syntactic
+		// occurrence, and two of them are the same thing only if they are at
+		// the same position.
+		//
+		// Keying everything on the label alone merged unrelated commands that
+		// happened to share one: two `cat` calls both produce "read and
+		// printed on stdout", and merging them cross-connected their edges
+		// into paths no flow contained.
 		key := kind + "\x00" + label
+		if kind != "variable" {
+			key = fmt.Sprintf("%s\x00%d:%d", key, span.Start, span.End)
+		}
 		if id, ok := byKey[key]; ok {
 			return id
 		}

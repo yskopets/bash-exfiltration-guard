@@ -80,6 +80,15 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc(apiPrefix+"/assess", s.handleAssess)
 	mux.HandleFunc(apiPrefix+"/knowledge", s.handleKnowledge)
 
+	// Anything else under /api/ is a mistake, not a page. Without this it
+	// falls through to "/" below, and the UI's SPA fallback answers 200 with
+	// HTML -- so a gate wired to `/api/v1/assess/` with a stray trailing
+	// slash gets 200 and no verdict anywhere in the body, and a caller
+	// keying on the status code fails open.
+	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
+		writeError(w, http.StatusNotFound, "no such endpoint: "+r.URL.Path)
+	})
+
 	// "/" is the catch-all pattern, and ServeMux prefers the more specific
 	// one, so the API routes above still win over the page.
 	mux.Handle("/", ui.Handler(s.ui))
@@ -122,7 +131,15 @@ func (s *Server) handleAssess(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, s.Assess(req.Command))
+	assessment := s.Assess(req.Command)
+
+	// The log line has a verdict column; fill it in. A policy gate that keeps
+	// no record of what it decided is hard to answer questions about later.
+	if rec, ok := w.(*statusRecorder); ok {
+		rec.verdict = assessment.Verdict
+	}
+
+	writeJSON(w, http.StatusOK, assessment)
 }
 
 // Assess runs one command through the analyzer. Exported so the CLI shares

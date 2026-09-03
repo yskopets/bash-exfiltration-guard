@@ -257,3 +257,34 @@ func TestTheUIDoesNotShadowTheAPI(t *testing.T) {
 		t.Errorf("GET /api/v1/assess = %d, want 405", rec.Code)
 	}
 }
+
+// An unmatched path under /api/ is a mistake, not a page. Falling through to
+// the UI's SPA fallback answered 200 with HTML, so a gate wired to
+// `/api/v1/assess/` -- one stray slash -- got 200 and no verdict, and a
+// caller keying on the status code failed open.
+func TestUnknownAPIPathsAreNotFound(t *testing.T) {
+	h := uiServer(t)
+
+	for _, path := range []string{
+		"/api/v1/assess/", "/api/v1/asses", "/api/v1/knowledge/", "/api/v1", "/api/",
+	} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"command":"ls"}`)))
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("POST %s = %d (%s), want 404", path, rec.Code, rec.Header().Get("Content-Type"))
+		}
+		if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+			t.Errorf("POST %s returned %q, want JSON", path, ct)
+		}
+	}
+
+	// The real route still works, and the page is still served at /.
+	if rec := post(t, h, `{"command":"ls"}`); rec.Code != http.StatusOK {
+		t.Errorf("the real endpoint broke: %d", rec.Code)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	if rec.Code != http.StatusOK {
+		t.Errorf("GET / = %d, want 200", rec.Code)
+	}
+}

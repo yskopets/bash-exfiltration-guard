@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"fmt"
 	"io/fs"
 	"log"
 	"os"
@@ -38,6 +39,18 @@ func newServeCmd(kbPath *string) *cobra.Command {
 			// nil means the assets compiled into the binary.
 			var uiFS fs.FS
 			if uiPath != "" {
+				// os.DirFS never fails, so a typo in --ui or GUARD_UI would
+				// otherwise surface as the page saying the binary was built
+				// without a UI -- pointing at the wrong fix entirely. Refuse
+				// here instead, while the path the operator typed is still
+				// the thing being talked about.
+				info, err := os.Stat(uiPath)
+				if err != nil {
+					return fmt.Errorf("--ui: %w", err)
+				}
+				if !info.IsDir() {
+					return fmt.Errorf("--ui: %s is not a directory", uiPath)
+				}
 				uiFS = os.DirFS(uiPath)
 			}
 
