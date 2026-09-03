@@ -140,3 +140,25 @@ func TestKnowledgeBaseFromTheEnvironment(t *testing.T) {
 		t.Errorf("--kb did not override GUARD_KB: %s", stderr)
 	}
 }
+
+// A command the knowledge base does not know gets "unknown", not "no
+// sensitive output". The latter is a claim about what a program does, and
+// printed beside NOT IN KNOWLEDGE BASE it reads as "we have no idea what this
+// is, and also it is fine".
+func TestUnknownCommandsReportUnknownRatherThanNone(t *testing.T) {
+	_, stdout, _ := runCLI(t, "", "assess",
+		`echo "${GH_TOKEN}" > /file/path; cp /file/path /another/path`)
+
+	if !strings.Contains(stdout, "unknown input; unknown output") {
+		t.Errorf("an unknown command did not report unknown:\n%s", stdout)
+	}
+	if strings.Contains(stdout, "NOT IN KNOWLEDGE BASE\n      no sensitive") {
+		t.Errorf("an unknown command still claims no sensitive data:\n%s", stdout)
+	}
+
+	// A known command that nothing sensitive reaches still says so plainly.
+	_, stdout, _ = runCLI(t, "", "assess", `ls -la`)
+	if !strings.Contains(stdout, "no sensitive input; no sensitive output") {
+		t.Errorf("a known, clean command should not say unknown:\n%s", stdout)
+	}
+}

@@ -91,15 +91,21 @@ export function Explanation({ assessment }: { assessment: Assessment }) {
               <td>
                 {c.receives ? (
                   <span className="sensitive">sensitive</span>
-                ) : (
+                ) : c.known ? (
                   <span className="muted">—</span>
+                ) : (
+                  <span className="unknown">unknown</span>
                 )}
               </td>
               <td>
+                {/* "—" is a claim about what a program does, and there is no
+                    basis for making it about one nobody modelled. */}
                 {c.produces ? (
                   <span className="sensitive">sensitive</span>
-                ) : (
+                ) : c.known ? (
                   <span className="muted">—</span>
+                ) : (
+                  <span className="unknown">unknown</span>
                 )}
                 {c.emits && <span className="emits">→ {c.emits}</span>}
               </td>
