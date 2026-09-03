@@ -95,6 +95,18 @@ Which slots exist, which count as exposure, and the allow/deny rules stay in cod
 The knowledge base says `curl -H` is an auth slot; it does not get to say what an
 auth slot means.
 
+## Design decisions and tradeoffs
+
+* `Novelty` - the Bash ecosystem has linters but has no data flow analyzer
+
+* `Design` - the design features a knowledge base of commands and their parameters
+   annotated with their relevance to the security flow. LLMs have made it possible to
+   fully automate maintanance of such a database
+
+* `Tradeoffs` - the scope of the prototype was timeboxed. Consequently, the supported Bash
+  grammar and command knowledge base are limited to and biased towards the commands present
+  in a single dataset of commands observed in practice
+
 ## Scope
 
 The prototype implementation has been tested on 129,915 unique commands captured from real Claude Code sessions in the CI environment:
