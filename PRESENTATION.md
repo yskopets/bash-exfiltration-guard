@@ -136,3 +136,9 @@ via either the UI or the API.
 * `~3h` on the prototype of the data flow analyzer
 * extra time on UI for the demo
 * extra time on presentation
+
+## Use of Claude Code
+
+* to extract Bash commands out of real Claude Code sessions in CI environment and compile a test dataset
+* to develop the prototype
+* to develop UI for the demo
