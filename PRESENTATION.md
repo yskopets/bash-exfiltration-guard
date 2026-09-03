@@ -114,3 +114,4 @@ via either the UI or the API.
 
 * `~3h` on the prototype of the data flow analyzer
 * extra time on UI for the demo
+* extra time on presentation
