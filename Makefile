@@ -24,7 +24,7 @@ OCI       := guard-oci.tar
 DOCKER_OUTPUT ?= --output=type=oci,dest=$(OCI)
 
 .DEFAULT_GOAL := help
-.PHONY: help build test test-bench test-cover check clean docker docker-local dev.run
+.PHONY: help build test test-integration test-bench test-cover check clean docker docker-local dev.run
 
 ## help:       list the targets
 help:
@@ -41,6 +41,16 @@ build:
 # A guarantee nobody checks is not a guarantee.
 test:
 	go test -race $(PKGS)
+
+## test-integration: smoke-test the built binary end to end
+#
+# Builds ./guard and runs it: real argv, real stdin, real exit codes, a real
+# listening socket and a real SIGTERM. Everything else in the suite is
+# in-process, so main() and ListenAndServe have no other coverage.
+#
+# `make test` includes these, since ./... covers them.
+test-integration:
+	go test ./test/integration -v
 
 ## test-bench: measure time and allocations for the parse -> assess flow
 #

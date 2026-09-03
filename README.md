@@ -37,6 +37,7 @@ verdict
 ```bash
 make build            # go build -o guard ./cmd/guard
 make test             # the suite, under the race detector
+make test-integration # smoke-test the built binary end to end
 make test-cover       # statement coverage across all packages
 make test-bench       # time and allocations, see Performance below
 make check            # go vet, and fail on anything unformatted
