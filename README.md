@@ -35,7 +35,11 @@ verdict
 ## Usage
 
 ```bash
-go build -o guard ./cmd/guard
+make build            # go build -o guard ./cmd/guard
+make test             # the suite, under the race detector
+make test-cover       # statement coverage across all packages
+make test-bench       # time and allocations, see Performance below
+make check            # go vet, and fail on anything unformatted
 
 ./guard assess '<bash command>'        # human-readable report
 ./guard assess --json '<bash command>' # the same assessment the HTTP API returns
@@ -640,7 +644,7 @@ actually happens, and what a diagram should show.
 ## Performance
 
 ```bash
-go test ./... -bench . -benchmem -run '^$'
+make test-bench
 
 # to compare a change against a baseline
 go test ./pkg/analyze -bench . -benchmem -count=10 > new.txt
@@ -771,5 +775,6 @@ it knows about specific programs arrives through one package's exported types.
 
 | other | |
 |---|---|
+| `Makefile` | build, test, coverage, benchmarks, vet |
 | `probes/` | the parser comparison, reproducible via `run.sh` |
 | `pkg/*/[a-z]*_test.go` | tests live beside the package they exercise |
