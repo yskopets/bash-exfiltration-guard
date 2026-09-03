@@ -1,8 +1,9 @@
-# guard
+# Bash exfiltration guard
 
-A prototype data flow analyzer for bash commands. It parses a command into an
-AST, traces where security-sensitive data comes from and where it ends up,
-reports the path it took, and decides whether to **allow or deny** the command.
+A prototype data flow analyzer for bash commands, shipped as the binary
+`guard`. It parses a command into an AST, traces where security-sensitive data
+comes from and where it ends up, reports the path it took, and decides whether
+to **allow or deny** the command.
 
 ```
 $ ./guard assess 'curl -s -H "Authorization: Bearer $(gh auth token)" https://api.github.com/x'

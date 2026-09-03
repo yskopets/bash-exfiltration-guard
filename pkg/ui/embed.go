@@ -104,7 +104,7 @@ func notBuilt(w http.ResponseWriter, r *http.Request) {
 
 const notBuiltPage = `<!doctype html>
 <meta charset="utf-8">
-<title>guard - UI not built</title>
+<title>Bash exfiltration guard &mdash; UI not built</title>
 <style>
   body { font: 15px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
          margin: 3rem auto; max-width: 34rem; padding: 0 1rem; }

@@ -56,9 +56,9 @@ export default function App() {
   return (
     <div className="page">
       <header>
-        <h1>guard</h1>
+        <h1>Bash exfiltration guard</h1>
         <p>
-          Paste a bash command. <strong>guard</strong> parses it, traces where
+          Paste a bash command. <strong>Bash exfiltration guard</strong> parses it, traces where
           security-sensitive data in it comes from and where it ends up, and decides
           whether it should run.
         </p>

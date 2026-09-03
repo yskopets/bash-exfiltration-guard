@@ -1,7 +1,8 @@
 package cli
 
-// guard decides whether a bash command should be allowed to run, by tracing
-// where security-sensitive data in it comes from and where it ends up.
+// The Bash exfiltration guard decides whether a bash command should be allowed
+// to run, by tracing where security-sensitive data in it comes from and where
+// it ends up. The binary is called `guard`.
 //
 //	guard assess '<bash command>'    assess one command
 //	guard config check              load and validate a knowledge base
@@ -16,7 +17,7 @@ package cli
 // A broken knowledge base exits 2 rather than 1, so it can never be mistaken
 // for a denied command.
 //
-// guard never executes anything it is given. It parses the command and walks
+// The Bash exfiltration guard never executes anything it is given. It parses the command and walks
 // the syntax tree; that is all it does with the string.
 
 import (
@@ -53,9 +54,10 @@ func newRootCmd() (*cobra.Command, *int) {
 
 	root := &cobra.Command{
 		Use:   "guard",
-		Short: "Decide whether a bash command may run, by tracing its data flow",
-		Long: "guard traces where security-sensitive data in a bash command comes from\n" +
-			"and where it ends up, then allows or denies the command.\n\n" +
+		Short: "Bash exfiltration guard: decide whether a bash command may run, by tracing its data flow",
+		Long: "The Bash exfiltration guard traces where security-sensitive data in a\n" +
+			"bash command comes from and where it ends up, then allows or denies\n" +
+			"the command.\n\n" +
 			"It never executes what it is given: it parses the command and walks the\n" +
 			"syntax tree, and that is all.",
 
