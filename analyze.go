@@ -932,6 +932,15 @@ func bindArgs(a *Analyzer, spec *Spec, args []*syntax.Word, values []Value) argS
 				note(i, "switch", SlotNone, true)
 				continue
 			}
+			// The value may be attached inside this same word. Quoting splits
+			// it into a second word part, so `-H"a: b"` has the literal prefix
+			// `-H` and looks like a bare flag -- while the word carries the
+			// value. Consuming the NEXT word there leaves the attached value
+			// bound to nothing and checked by nobody.
+			if attached := attachedValue(full, lead); attached != "" {
+				bind(i, fs.Rule, lead, attached, "value of "+lead)
+				continue
+			}
 			note(i, "flag", SlotNone, true)
 			if i+1 < len(args) {
 				bind(i+1, fs.Rule, lead, a.text(args[i+1]), "value of "+lead)
@@ -971,9 +980,12 @@ func bindArgs(a *Analyzer, spec *Spec, args []*syntax.Word, values []Value) argS
 			if !fs.TakesValue {
 				continue
 			}
-			if j+1 < len(rest) {
-				// -d@file : the value is attached to the flag in this word.
-				bind(i, fs.Rule, flag, full[2+j:], "value of "+flag)
+			// Whatever follows this letter in the word is the value, whether
+			// it is more of the same literal (`-d@file`) or a quoted part
+			// that begins a new one (`-sH"a: b"`).
+			if attached := clusterValue(full, j); attached != "" {
+				scan.uses = scan.uses[:len(scan.uses)-1] // replaced by bind's note
+				bind(i, fs.Rule, flag, attached, "value of "+flag)
 			} else if i+1 < len(args) {
 				bind(i+1, fs.Rule, flag, a.text(args[i+1]), "value of "+flag)
 				i++
@@ -999,6 +1011,29 @@ func isNumericOption(lead string) bool {
 
 // positionalArg is the label used for arguments that are not flag values.
 const positionalArg = "positional"
+
+// attachedValue returns the part of a word that follows the flag it starts
+// with, or "" when the word is only the flag.
+//
+// This has to look at the whole word rather than at its literal prefix. Bash
+// splits `-H"a: b"` into the literal `-H` and a separate quoted part, so the
+// prefix alone cannot tell that word apart from a bare `-H`.
+func attachedValue(full, flag string) string {
+	if !strings.HasPrefix(full, flag) {
+		return ""
+	}
+	return full[len(flag):]
+}
+
+// clusterValue returns what follows the j-th letter of a short-flag cluster:
+// one for the leading "-", j for the letters before it, one for the letter
+// itself.
+func clusterValue(full string, j int) string {
+	if at := j + 2; at < len(full) {
+		return full[at:]
+	}
+	return ""
+}
 
 // leadingLit returns the literal prefix of a word, which is what identifies a
 // flag. For `--data=$TOKEN` that is "--data=", the part before the expansion.
