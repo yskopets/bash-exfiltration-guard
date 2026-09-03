@@ -30,6 +30,7 @@ const (
 	SlotContent
 	SlotFile
 	SlotDisk
+	SlotStdout
 )
 
 // slotInfo is the single list of slot names. The YAML loader resolves names
@@ -41,6 +42,7 @@ var slotInfo = map[Slot]struct{ Name, Desc string }{
 	SlotContent: {"content", "transmitted to the remote host as the request payload"},
 	SlotFile:    {"file", "the file's contents are uploaded"},
 	SlotDisk:    {"disk", "written to a file on disk"},
+	SlotStdout:  {"stdout", "printed where the caller reads it -- and when the caller is an agent, that is the model"},
 }
 
 func (s Slot) String() string { return slotInfo[s].Name }

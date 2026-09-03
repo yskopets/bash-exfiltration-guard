@@ -166,6 +166,11 @@ func (a *Analyzer) Decide() (Verdict, []string) {
 			continue
 		}
 		verdict = Deny
+		if f.Slot == SlotStdout {
+			reasons = append(reasons, "sensitive data is printed to stdout, where "+
+				"the caller reads it -- and when the caller is an agent, that is the model")
+			continue
+		}
 		reasons = append(reasons, "sensitive data reaches "+f.Emits+
 			" via "+f.Command+" "+f.Arg+" ("+f.SlotName+" slot)")
 	}
@@ -284,7 +289,7 @@ func Analyze(src string, kb *KnowledgeBase) (*Analyzer, error) {
 		return nil, err
 	}
 	a := &Analyzer{src: src, kb: kb, env: map[string]Value{}}
-	a.stmts(file.Stmts, Value{})
+	a.toTerminal(a.stmts(file.Stmts, Value{}), a.span(file))
 	return a, nil
 }
 
@@ -323,7 +328,10 @@ func (a *Analyzer) stmts(list []*syntax.Stmt, stdin Value) Value {
 func (a *Analyzer) stmt(s *syntax.Stmt, stdin Value) Value {
 	stdin = union(stdin, a.inputRedirs(s))
 	out := a.command(s.Cmd, stdin)
-	a.outputRedirs(s, out)
+	if a.outputRedirs(s, out) {
+		// The data went to the file, not onward.
+		return Value{}
+	}
 	return out
 }
 
@@ -381,11 +389,15 @@ func (a *Analyzer) inputRedirs(s *syntax.Stmt) Value {
 
 // outputRedirs routes a command's stdout into `> file`, which is a sink: the
 // data is now sitting on disk where it was not before.
-func (a *Analyzer) outputRedirs(s *syntax.Stmt, out Value) {
+//
+// It reports whether stdout was captured. When it was, the data went to the
+// file rather than to the caller, and must not be counted as printed as well.
+func (a *Analyzer) outputRedirs(s *syntax.Stmt, out Value) (captured bool) {
 	for _, r := range s.Redirs {
 		if !capturesStdout(r) {
 			continue
 		}
+		captured = true
 		target := a.text(r.Word)
 		if a.kb.IsDiscard(target) {
 			continue
@@ -402,6 +414,7 @@ func (a *Analyzer) outputRedirs(s *syntax.Stmt, out Value) {
 			})
 		}
 	}
+	return captured
 }
 
 // command dispatches on the kind of shell command. Only the constructs a
@@ -422,7 +435,7 @@ func (a *Analyzer) command(c syntax.Command, stdin Value) Value {
 			left := a.stmt(x.X, stdin)
 			return a.stmt(x.Y, left.then(StepPipe, "piped into the next command", a.span(x)))
 		}
-		a.stmt(x.X, stdin)
+		a.toTerminal(a.stmt(x.X, stdin), a.span(x.X))
 		return a.stmt(x.Y, stdin)
 
 	case *syntax.Subshell:
@@ -431,7 +444,7 @@ func (a *Analyzer) command(c syntax.Command, stdin Value) Value {
 		return a.stmts(x.Stmts, stdin)
 
 	case *syntax.IfClause:
-		a.stmts(x.Cond, stdin)
+		a.toTerminal(a.stmts(x.Cond, stdin), a.span(x))
 		out := a.stmts(x.Then, stdin)
 		if x.Else != nil {
 			out = union(out, a.command(x.Else, stdin))
@@ -439,7 +452,7 @@ func (a *Analyzer) command(c syntax.Command, stdin Value) Value {
 		return out
 
 	case *syntax.WhileClause:
-		a.stmts(x.Cond, stdin)
+		a.toTerminal(a.stmts(x.Cond, stdin), a.span(x))
 		return a.stmts(x.Do, stdin)
 	case *syntax.ForClause:
 		return a.stmts(x.Do, stdin)
@@ -611,6 +624,32 @@ func (a *Analyzer) recordSinks(spec *Spec, name string, c *syntax.CallExpr, args
 				Span:     a.span(args[b.index]),
 			})
 		}
+	}
+}
+
+// toTerminal records sensitive data that a command printed with nothing to
+// catch it.
+//
+// This is a sink like any other, and in an agent it is the likeliest one. The
+// output of an assessed command goes back to the model: into its context, its
+// reasoning, its next tool call, and the transcript. `cat ~/.aws/credentials`
+// exfiltrates just as surely as `curl -d @~/.aws/credentials` does -- it just
+// uses the agent as the transport.
+//
+// Only data the analyzer identified as sensitive counts. Unresolved output
+// reaching the terminal is what every command does all day, so unlike a
+// network slot this one does not deny on unknown provenance.
+func (a *Analyzer) toTerminal(v Value, span Span) {
+	for _, f := range v.Flows {
+		a.Findings = append(a.Findings, Finding{
+			Flow:     f.then(StepSink, "printed to stdout with nothing to catch it", span),
+			Command:  "stdout",
+			Arg:      "stdout",
+			Slot:     SlotStdout,
+			SlotName: SlotStdout.String(),
+			Emits:    "the caller, which for an agent means the model",
+			Span:     span,
+		})
 	}
 }
 
@@ -821,6 +860,21 @@ func (a *Analyzer) paramExp(x *syntax.ParamExp) Value {
 	if x.Param == nil {
 		return Value{}
 	}
+
+	// `${#VAR}` is the value's length, not the value. That is a length oracle
+	// -- the same much weaker leak that `wc` produces, and treated the same
+	// way here: the flow stops.
+	if x.Length {
+		return Value{}
+	}
+
+	// `${VAR:+word}` and `${VAR+word}` expand to `word`, never to the value.
+	// A common way to probe for a credential without printing it, and
+	// reporting it as a leak flags careful code for being careful.
+	if x.Exp != nil && (x.Exp.Op == syntax.AlternateUnset || x.Exp.Op == syntax.AlternateUnsetOrNull) {
+		return a.word(x.Exp.Word)
+	}
+
 	name := x.Param.Value
 
 	if v, ok := a.env[name]; ok {
