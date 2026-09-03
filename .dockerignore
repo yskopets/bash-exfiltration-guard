@@ -8,6 +8,7 @@ coverage.out
 probes
 test
 ui/node_modules
+ui/tsconfig.tsbuildinfo
 README.md
 Makefile
 Dockerfile

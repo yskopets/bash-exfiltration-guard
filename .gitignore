@@ -2,5 +2,6 @@
 coverage.out
 guard-oci.tar
 ui/node_modules/
+ui/tsconfig.tsbuildinfo
 pkg/ui/dist/*
 !pkg/ui/dist/.gitkeep

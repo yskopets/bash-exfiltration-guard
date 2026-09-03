@@ -650,9 +650,21 @@ Every non-obvious finding in this project came from someone asking "what does
 it say about *this* shape?" — the attached-flag bug, the `curl -v` stderr
 echo, printing to stdout. This makes that loop take five seconds.
 
-It shows the verdict and its reasons, the flows as ordered hops with the slot
-each landed in, the per-command coverage table, and the graph. The graph is
-where the argument this whole tool rests on becomes visible at a glance:
+Three columns: **examples** on the left, the assessment in the middle,
+**history** on the right. Clicking either side assesses that command
+immediately, so comparing two shapes is two clicks rather than two rebuilds.
+
+History keeps the last 100 commands with their verdicts, in `localStorage`, so
+it survives a reload. Re-assessing a command moves it to the front rather than
+adding a second copy — a list showing the same command six times is a worse
+record of what you have looked at than one line saying you looked at it. Both
+sidebars stick and scroll independently, so a long report does not scroll them
+away.
+
+The middle column shows the verdict and its reasons, the flows as ordered hops
+with the slot each landed in, the per-command coverage table, and the graph.
+The graph is where the argument this whole tool rests on becomes visible at a
+glance:
 
 ```
 X=$(gh auth token); curl -H "Authorization: Bearer $X" -d "$X" https://api.github.com/x
