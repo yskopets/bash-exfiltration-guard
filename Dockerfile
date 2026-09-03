@@ -34,7 +34,7 @@ COPY --from=build /out/guard /usr/local/bin/guard
 # The base is embedded in the binary too, but shipping it as a file and
 # pointing --kb at it makes the file authoritative: mount your own over
 # /etc/guard/knowledge.yaml and the container runs your policy, with
-# /v1/knowledge naming which one it loaded.
+# /api/v1/knowledge naming which one it loaded.
 COPY pkg/knowledge/knowledge.yaml /etc/guard/knowledge.yaml
 
 # Set as an environment default rather than a CMD flag. Explicit arguments

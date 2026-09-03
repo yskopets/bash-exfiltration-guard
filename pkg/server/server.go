@@ -54,15 +54,20 @@ func NewServer(kb *knowledge.Base, logger *log.Logger) *Server {
 	return &Server{kb: kb, log: logger}
 }
 
+// Routes are under /api/v1: /api names the machine-readable surface, leaving
+// the rest of the path space free for anything a person is meant to open, and
+// /v1 is where a breaking change to the response shape would go.
+const apiPrefix = "/api/v1"
+
 // Handler builds the routing table.
 //
-// There is no health endpoint. GET /v1/knowledge is cheap, needs no analysis,
-// and answers "is it up?" and "which policy is it running?" together, which is
-// strictly more than a bare 200 would say.
+// There is no health endpoint. GET /api/v1/knowledge is cheap, needs no
+// analysis, and answers "is it up?" and "which policy is it running?"
+// together, which is strictly more than a bare 200 would say.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/assess", s.handleAssess)
-	mux.HandleFunc("/v1/knowledge", s.handleKnowledge)
+	mux.HandleFunc(apiPrefix+"/assess", s.handleAssess)
+	mux.HandleFunc(apiPrefix+"/knowledge", s.handleKnowledge)
 	return s.recoverPanics(s.logRequests(mux))
 }
 

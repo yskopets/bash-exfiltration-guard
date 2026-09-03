@@ -601,7 +601,7 @@ docker run --rm -v ./my-knowledge.yaml:/etc/guard/knowledge.yaml:ro \
   -p 8080:8080 guard:dev
 ```
 
-`GET /v1/knowledge` then names the file it loaded, so which policy is running
+`GET /api/v1/knowledge` then names the file it loaded, so which policy is running
 is never in doubt.
 
 Two notes on the build. It cross-compiles from the build platform rather than
@@ -630,10 +630,10 @@ should stay there.
 
 | endpoint | |
 |---|---|
-| `POST /v1/assess` | body `{"command": "..."}` → an assessment |
-| `GET /v1/knowledge` | which knowledge base is loaded |
+| `POST /api/v1/assess` | body `{"command": "..."}` → an assessment |
+| `GET /api/v1/knowledge` | which knowledge base is loaded |
 
-There is no `/healthz`. `GET /v1/knowledge` is cheap, needs no analysis, and
+There is no `/healthz`. `GET /api/v1/knowledge` is cheap, needs no analysis, and
 answers "is it up?" and "which policy is it running?" together — strictly more
 than a bare 200 would say.
 

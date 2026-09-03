@@ -30,7 +30,7 @@ func testServer(t *testing.T) http.Handler {
 
 func post(t *testing.T, h http.Handler, body string) *httptest.ResponseRecorder {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodPost, "/v1/assess", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/assess", strings.NewReader(body))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	return rec
@@ -112,8 +112,8 @@ func TestWrongMethods(t *testing.T) {
 	h := testServer(t)
 
 	for path, method := range map[string]string{
-		"/v1/assess":    http.MethodGet,
-		"/v1/knowledge": http.MethodPost,
+		"/api/v1/assess":    http.MethodGet,
+		"/api/v1/knowledge": http.MethodPost,
 	} {
 		t.Run(path, func(t *testing.T) {
 			rec := httptest.NewRecorder()
@@ -128,11 +128,11 @@ func TestWrongMethods(t *testing.T) {
 	}
 }
 
-// There is no /healthz. /v1/knowledge serves that purpose and says more:
+// There is no /healthz. /api/v1/knowledge serves that purpose and says more:
 // it proves the process is up AND names the policy it is running.
 func TestKnowledgeEndpoint(t *testing.T) {
 	rec := httptest.NewRecorder()
-	testServer(t).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/knowledge", nil))
+	testServer(t).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/knowledge", nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}

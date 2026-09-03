@@ -310,7 +310,7 @@ func (kb *Base) Summary() string {
 }
 
 // Counts reports how many commands and subcommands the base declares, for the
-// /v1/knowledge endpoint.
+// /api/v1/knowledge endpoint.
 func (kb *Base) Counts() (commands, subcommands int) {
 	commands, subcommands, _, _ = kb.counts()
 	return commands, subcommands
