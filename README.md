@@ -637,6 +637,63 @@ narrative and repeat shared hops; the graph deduplicates them, so
 **one** source and **one** `$TOKEN` node feeding two sinks — which is what
 actually happens, and what a diagram should show.
 
+## Performance
+
+```bash
+go test ./... -bench . -benchmem -run '^$'
+
+# to compare a change against a baseline
+go test ./pkg/analyze -bench . -benchmem -count=10 > new.txt
+benchstat old.txt new.txt
+```
+
+Baseline on an Apple M3 Pro, Go 1.26. The command set is sized to the real
+distribution: in the 172,661-invocation CI corpus the median command was 144
+bytes, the 90th percentile 656 and the 99th 7,269.
+
+| parse → assess | time | allocs |
+|---|---|---|
+| `ls -la` | 1.3 µs | 20 |
+| typical (94 B) | 15.6 µs | 57 |
+| credential into an auth header | 17.9 µs | 53 |
+| through a variable | 12.6 µs | 68 |
+| five-stage pipeline | 15.4 µs | 126 |
+| p90 (656 B) | 106 µs | 357 |
+| p99 (7 KB) | 625 µs | 6,653 |
+
+**Cost is linear in command length**, at a steady ~10 MB/s — 60 B costs 5.9 µs,
+60 KB costs 5.6 ms. So the largest command in the corpus, 43 KB, assesses in
+about 4 ms. Nothing here is quadratic in the number of statements, which is
+the failure mode a benchmark like this exists to catch.
+
+### Where the time goes
+
+| layer | share of a typical assessment |
+|---|---|
+| loading the knowledge base | **684 µs — paid once per process** |
+| parsing (mvdan.cc/sh) | ~1.5 µs |
+| the analyzer walk | ~14 µs |
+| `Decide()` | ~0.1 µs |
+| `api.NewAssessment` | 2.3 µs |
+| JSON encoding | 6.2 µs |
+
+Two things fall out of that table.
+
+**The knowledge base costs 40× what an assessment does.** Loading it is 684 µs
+against ~16 µs to assess a typical command, so a one-shot `guard assess` spends
+almost all of its time on startup. That is the argument for `guard serve`,
+quantified: the server pays it once and then answers requests at ~16 µs each.
+A `PreToolUse` hook that shells out per command pays it every time.
+
+**Regex matching costs about as much as the entire bash parser.** Under a CPU
+profile the two heuristics — `secret-paths` and `secret-var-names`, applied to
+every literal in the command — account for roughly as much time as
+mvdan.cc/sh spends parsing. If these numbers ever need to improve, that is
+where to look first, not at the parser.
+
+`Lookup` is 7–30 ns with zero allocations, so the knowledge base is not on the
+hot path once it is loaded.
+
 ## What this prototype does not do
 
 Stated explicitly, because a security tool that hides its blind spots is worse
