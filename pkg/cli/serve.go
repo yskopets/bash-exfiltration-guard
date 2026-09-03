@@ -1,10 +1,12 @@
-package main
+package cli
 
 import (
 	"context"
 	"log"
 
 	"github.com/spf13/cobra"
+
+	"guard/pkg/server"
 )
 
 // newServeCmd builds `guard serve`.
@@ -29,7 +31,7 @@ func newServeCmd(kbPath *string) *cobra.Command {
 				return err
 			}
 			logger := log.New(cmd.ErrOrStderr(), "", log.LstdFlags)
-			return NewServer(kb, logger).ListenAndServe(context.Background(), addr)
+			return server.NewServer(kb, logger).ListenAndServe(context.Background(), addr)
 		},
 	}
 

@@ -1,4 +1,4 @@
-package main
+package knowledge
 
 import (
 	"strings"
@@ -31,9 +31,9 @@ commands:
       -d: content
 `
 
-func loadOK(t *testing.T, src string) *KnowledgeBase {
+func loadOK(t *testing.T, src string) *Base {
 	t.Helper()
-	kb, err := parseKnowledge([]byte(src), "test.yaml")
+	kb, err := Parse([]byte(src), "test.yaml")
 	if err != nil {
 		t.Fatalf("expected the base to load, got: %v", err)
 	}
@@ -45,7 +45,7 @@ func loadOK(t *testing.T, src string) *KnowledgeBase {
 // better than no validation.
 func loadFails(t *testing.T, src string, mentions ...string) {
 	t.Helper()
-	_, err := parseKnowledge([]byte(src), "test.yaml")
+	_, err := Parse([]byte(src), "test.yaml")
 	if err == nil {
 		t.Fatalf("expected the base to be refused, but it loaded")
 	}
@@ -142,39 +142,10 @@ func TestEmptyBaseIsRefused(t *testing.T) {
 	loadFails(t, strings.Split(minimal, "commands:")[0]+"commands: {}\n", "commands")
 }
 
-// The base is not merged with anything: swapping the file swaps the policy.
-// Here a base that does not know curl's -H turns an allowed command into a
-// denied one, which is the whole point of making it configurable.
-func TestSwappingTheBaseChangesTheVerdict(t *testing.T) {
-	cmd := `curl -s -H "Authorization: Bearer $TOKEN" https://api.example.com`
-
-	a, err := Analyze(cmd, loadOK(t, minimal))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if v, reasons := a.Decide(); v != Allow {
-		t.Fatalf("with -H declared: verdict = %s, want ALLOW; %v", v, reasons)
-	}
-
-	stripped := strings.Replace(minimal,
-		"      -H: {slot: auth, when: auth-header, else: content}\n", "", 1)
-	a, err = Analyze(cmd, loadOK(t, stripped))
-	if err != nil {
-		t.Fatal(err)
-	}
-	v, reasons := a.Decide()
-	if v != Deny {
-		t.Fatalf("with -H removed: verdict = %s, want DENY", v)
-	}
-	if !strings.Contains(strings.Join(reasons, " "), "-H") {
-		t.Errorf("expected the denial to name the undeclared flag: %v", reasons)
-	}
-}
-
 // The base that ships in the binary must itself be valid, and must be the one
 // the tests exercise.
 func TestBuiltinBaseIsValid(t *testing.T) {
-	kb, err := LoadBuiltinKnowledge()
+	kb, err := LoadBuiltin()
 	if err != nil {
 		t.Fatalf("built-in knowledge base does not load: %v", err)
 	}

@@ -1,4 +1,4 @@
-package main
+package server
 
 // The HTTP API.
 //
@@ -25,6 +25,10 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+
+	"guard/pkg/analyze"
+	"guard/pkg/api"
+	"guard/pkg/knowledge"
 )
 
 // maxBodyBytes caps a request. The largest command in a corpus of 172,661
@@ -39,11 +43,11 @@ const maxBodyBytes = 1 << 20
 // mutably between them -- which is asserted by a test under -race rather than
 // assumed.
 type Server struct {
-	kb  *KnowledgeBase
+	kb  *knowledge.Base
 	log *log.Logger
 }
 
-func NewServer(kb *KnowledgeBase, logger *log.Logger) *Server {
+func NewServer(kb *knowledge.Base, logger *log.Logger) *Server {
 	if logger == nil {
 		logger = log.New(io.Discard, "", 0)
 	}
@@ -102,16 +106,16 @@ func (s *Server) handleAssess(w http.ResponseWriter, r *http.Request) {
 
 // Assess runs one command through the analyzer. Exported so the CLI shares
 // exactly this path, and so tests can exercise it without HTTP.
-func (s *Server) Assess(command string) Assessment {
-	a, err := Analyze(command, s.kb)
+func (s *Server) Assess(command string) api.Assessment {
+	a, err := analyze.Analyze(command, s.kb)
 	if err != nil {
 		// An unparsable command is a verdict, not a transport error: the data
 		// flow is unknown, and unknown is never an allow. Returning 4xx here
 		// would invite callers to read it as "retry" rather than "refused".
-		return UnparsableAssessment(command, s.kb, err)
+		return api.UnparsableAssessment(command, s.kb, err)
 	}
 	verdict, reasons := a.Decide()
-	return NewAssessment(command, a, verdict, reasons)
+	return api.NewAssessment(command, a, verdict, reasons)
 }
 
 type knowledgeResponse struct {

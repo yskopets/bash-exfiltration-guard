@@ -1,4 +1,4 @@
-package main
+package cli
 
 // guard decides whether a bash command should be allowed to run, by tracing
 // where security-sensitive data in it comes from and where it ends up.
@@ -24,6 +24,8 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
+
+	"guard/pkg/knowledge"
 )
 
 // Exit codes, named so the intent is visible at every call site.
@@ -33,11 +35,8 @@ const (
 	exitUsage = 2
 )
 
-func main() {
-	os.Exit(execute())
-}
-
-func execute() int {
+// Execute runs the command tree and returns the process exit code.
+func Execute() int {
 	root, code := newRootCmd()
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "guard:", err)
@@ -90,9 +89,9 @@ func newRootCmd() (*cobra.Command, *int) {
 // compiled into the binary. There is no merging -- the base that loads is the
 // whole policy, so "which knowledge base produced this verdict" has exactly
 // one answer.
-func loadKnowledge(path string) (*KnowledgeBase, error) {
+func loadKnowledge(path string) (*knowledge.Base, error) {
 	if path != "" {
-		return LoadKnowledgeFile(path)
+		return knowledge.LoadFile(path)
 	}
-	return LoadBuiltinKnowledge()
+	return knowledge.LoadBuiltin()
 }

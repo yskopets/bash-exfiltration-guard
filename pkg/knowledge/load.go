@@ -1,4 +1,4 @@
-package main
+package knowledge
 
 // Loading and validating the knowledge base.
 //
@@ -25,7 +25,7 @@ var builtinKnowledge []byte
 // ---------------------------------------------------------------- schema
 //
 // These types exist only to be decoded into. They mirror the YAML, not the
-// runtime model; buildKnowledge converts one to the other so that a schema
+// runtime model; build converts one to the other so that a schema
 // change does not leak into the analyzer.
 
 type yamlFile struct {
@@ -82,23 +82,25 @@ func (f *yamlFlag) UnmarshalYAML(n *yaml.Node) error {
 
 // ---------------------------------------------------------------- loading
 
-// LoadBuiltinKnowledge returns the knowledge base compiled into the binary.
-func LoadBuiltinKnowledge() (*KnowledgeBase, error) {
-	return parseKnowledge(builtinKnowledge, "built-in")
+// LoadBuiltin returns the knowledge base compiled into the binary.
+func LoadBuiltin() (*Base, error) {
+	return Parse(builtinKnowledge, "built-in")
 }
 
-// LoadKnowledgeFile reads a knowledge base from disk, replacing the built-in
+// LoadFile reads a knowledge base from disk, replacing the built-in
 // one entirely. There is no merging: the file that is loaded is the whole
 // policy, so that "which knowledge base produced this verdict" has one answer.
-func LoadKnowledgeFile(path string) (*KnowledgeBase, error) {
+func LoadFile(path string) (*Base, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("knowledge base: %w", err)
 	}
-	return parseKnowledge(b, path)
+	return Parse(b, path)
 }
 
-func parseKnowledge(data []byte, source string) (*KnowledgeBase, error) {
+// Parse loads a knowledge base from bytes. Exported so a caller can build
+// one from a literal -- a test that needs a base with exactly one command.
+func Parse(data []byte, source string) (*Base, error) {
 	dec := yaml.NewDecoder(strings.NewReader(string(data)))
 
 	// A misspelled key must be an error rather than a silent no-op. `swithces:`
@@ -110,14 +112,14 @@ func parseKnowledge(data []byte, source string) (*KnowledgeBase, error) {
 	if err := dec.Decode(&f); err != nil {
 		return nil, fmt.Errorf("%s: %w", source, err)
 	}
-	kb, err := buildKnowledge(&f, source)
+	kb, err := build(&f, source)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", source, err)
 	}
 	return kb, nil
 }
 
-func buildKnowledge(f *yamlFile, source string) (*KnowledgeBase, error) {
+func build(f *yamlFile, source string) (*Base, error) {
 	if f.Version != 1 {
 		return nil, fmt.Errorf("version must be 1, got %d", f.Version)
 	}
@@ -131,7 +133,7 @@ func buildKnowledge(f *yamlFile, source string) (*KnowledgeBase, error) {
 		patterns[name] = re
 	}
 
-	kb := &KnowledgeBase{
+	kb := &Base{
 		Source:             source,
 		Commands:           map[string]*Spec{},
 		TrustedProgramDirs: map[string]bool{},
@@ -299,7 +301,7 @@ func slotNames() string {
 // Summary describes a loaded knowledge base, for `guard -check`. Editing the
 // base is going to be the main way this tool grows, so it needs a way to say
 // "this file loaded, and here is what it contains".
-func (kb *KnowledgeBase) Summary() string {
+func (kb *Base) Summary() string {
 	commands, subcommands, flags, switches := kb.counts()
 	return fmt.Sprintf(
 		"knowledge base %s\n  %d commands, %d subcommands\n  %d value-taking flags, %d switches\n  %d trusted program dirs, %d discard targets",
@@ -309,12 +311,12 @@ func (kb *KnowledgeBase) Summary() string {
 
 // Counts reports how many commands and subcommands the base declares, for the
 // /v1/knowledge endpoint.
-func (kb *KnowledgeBase) Counts() (commands, subcommands int) {
+func (kb *Base) Counts() (commands, subcommands int) {
 	commands, subcommands, _, _ = kb.counts()
 	return commands, subcommands
 }
 
-func (kb *KnowledgeBase) counts() (commands, subcommands, flags, switches int) {
+func (kb *Base) counts() (commands, subcommands, flags, switches int) {
 	var walk func(s *Spec)
 	walk = func(s *Spec) {
 		for _, f := range s.Flags {

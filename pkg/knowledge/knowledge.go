@@ -1,4 +1,4 @@
-package main
+package knowledge
 
 import (
 	"regexp"
@@ -48,6 +48,24 @@ var slotInfo = map[Slot]struct{ Name, Desc string }{
 func (s Slot) String() string { return slotInfo[s].Name }
 func (s Slot) Desc() string   { return slotInfo[s].Desc }
 
+// Exposes reports whether a slot puts data somewhere it can be observed by
+// someone who should not see it. An Authorization header is not exposure --
+// that is what the credential is for.
+func (s Slot) Exposes() bool { return s != SlotAuth && s != SlotNone }
+
+// SendsRemotely reports whether a slot puts data somewhere off this machine.
+//
+// Data of unknown origin denies only for these. Writing an unknown program's
+// output to a local file, or printing it, is what ordinary commands do all
+// day, so the disk and output slots are excluded.
+func (s Slot) SendsRemotely() bool {
+	switch s {
+	case SlotAuth, SlotURL, SlotContent, SlotFile:
+		return true
+	}
+	return false
+}
+
 // SlotRule assigns a slot to a flag's value.
 //
 // Some flags are not one slot. `curl -H` carries a credential when the header
@@ -59,10 +77,10 @@ type SlotRule struct {
 	Else Slot           // the slot to use when When does not match
 }
 
-func slot(s Slot) SlotRule { return SlotRule{Slot: s} }
+func NewSlotRule(s Slot) SlotRule { return SlotRule{Slot: s} }
 
 // resolve picks the slot for a concrete argument.
-func (r SlotRule) resolve(arg string) Slot {
+func (r SlotRule) Resolve(arg string) Slot {
 	if r.When != nil && !r.When.MatchString(arg) {
 		return r.Else
 	}
@@ -137,10 +155,10 @@ type Spec struct {
 	Subcommands map[string]*Spec
 }
 
-// KnowledgeBase is one loaded knowledge base. Everything the analyzer knows
+// Base is one loaded knowledge base. Everything the analyzer knows
 // about the world outside the shell grammar comes from here, so that swapping
 // the file swaps the policy and nothing else.
-type KnowledgeBase struct {
+type Base struct {
 	// Source says where this base came from -- "built-in" or a file path --
 	// so that "which knowledge base produced this verdict" is answerable
 	// from the report alone.
@@ -171,7 +189,7 @@ type KnowledgeBase struct {
 //
 // It returns the matched spec, the number of argument words consumed by the
 // subcommand path, and whether the base command was known at all.
-func (kb *KnowledgeBase) Lookup(name string, args []string) (spec *Spec, consumed int, known bool) {
+func (kb *Base) Lookup(name string, args []string) (spec *Spec, consumed int, known bool) {
 	spec, known = kb.Commands[name]
 	if !known {
 		return nil, 0, false
@@ -195,7 +213,7 @@ func (kb *KnowledgeBase) Lookup(name string, args []string) (spec *Spec, consume
 // A bare name is resolved through PATH when the shell runs it. Trusting that
 // is the same assumption every other tool on the machine makes, so a bare name
 // is trusted; a path is trusted only inside a system directory.
-func (kb *KnowledgeBase) ResolveProgram(name string) (bin, path string, trusted bool) {
+func (kb *Base) ResolveProgram(name string) (bin, path string, trusted bool) {
 	i := strings.LastIndex(name, "/")
 	if i < 0 {
 		return name, "", true
@@ -206,6 +224,6 @@ func (kb *KnowledgeBase) ResolveProgram(name string) (bin, path string, trusted 
 // IsDiscard reports whether a redirect target throws its input away. Writing a
 // secret to /dev/null is not a leak, and `2>/dev/null` is so common that
 // treating it as one drowns every real finding.
-func (kb *KnowledgeBase) IsDiscard(target string) bool {
+func (kb *Base) IsDiscard(target string) bool {
 	return kb.DiscardTargets[strings.Trim(target, `"'`)]
 }

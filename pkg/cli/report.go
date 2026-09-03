@@ -1,4 +1,4 @@
-package main
+package cli
 
 // Rendering an assessment for a terminal.
 //
@@ -9,6 +9,9 @@ import (
 	"fmt"
 	"io"
 	"strings"
+
+	"guard/pkg/analyze"
+	"guard/pkg/knowledge"
 )
 
 // maxReported caps the per-command coverage listing. Real commands run to tens
@@ -19,7 +22,7 @@ const (
 	maxArgsReported     = 10
 )
 
-func report(w io.Writer, src string, a *Analyzer, verdict Verdict, reasons []string) {
+func report(w io.Writer, src string, a *analyze.Analyzer, verdict analyze.Verdict, reasons []string) {
 	fmt.Fprintf(w, "command\n  %s\n\n", src)
 	reportCoverage(w, a)
 	reportFlows(w, src, a)
@@ -33,11 +36,11 @@ func report(w io.Writer, src string, a *Analyzer, verdict Verdict, reasons []str
 	}
 
 	fmt.Fprintf(w, "verdict\n  %s\n", verdict)
-	fmt.Fprintf(w, "    (knowledge base: %s)\n", a.kb.Source)
+	fmt.Fprintf(w, "    (knowledge base: %s)\n", a.Base().Source)
 	for _, r := range reasons {
 		fmt.Fprintf(w, "    - %s\n", r)
 	}
-	if verdict == Allow && hasAuthFinding(a) {
+	if verdict == analyze.Allow && hasAuthFinding(a) {
 		fmt.Fprintf(w, "  caveat: destination hosts are not modelled, so a credential sent to an\n"+
 			"          untrusted host is indistinguishable from one sent to a trusted host.\n")
 	}
@@ -45,7 +48,7 @@ func report(w io.Writer, src string, a *Analyzer, verdict Verdict, reasons []str
 
 // reportCoverage answers the question the verdict rests on: which parts of
 // this command does the knowledge base actually account for?
-func reportCoverage(w io.Writer, a *Analyzer) {
+func reportCoverage(w io.Writer, a *analyze.Analyzer) {
 	fmt.Fprintf(w, "commands\n")
 	if len(a.Uses) == 0 {
 		fmt.Fprintf(w, "  (none)\n\n")
@@ -77,7 +80,7 @@ func reportCoverage(w io.Writer, a *Analyzer) {
 	fmt.Fprintln(w)
 }
 
-func coverageLabel(u CommandUse) string {
+func coverageLabel(u analyze.CommandUse) string {
 	switch {
 	case u.Computed != "":
 		return "FORBIDDEN: name from " + u.Computed
@@ -91,7 +94,7 @@ func coverageLabel(u CommandUse) string {
 	return "fully understood"
 }
 
-func dataLabel(u CommandUse) string {
+func dataLabel(u analyze.CommandUse) string {
 	parts := []string{}
 	if u.Receives {
 		parts = append(parts, "receives sensitive data")
@@ -104,7 +107,7 @@ func dataLabel(u CommandUse) string {
 	return strings.Join(parts, ", ")
 }
 
-func reportFlows(w io.Writer, src string, a *Analyzer) {
+func reportFlows(w io.Writer, src string, a *analyze.Analyzer) {
 	if len(a.Findings) == 0 {
 		fmt.Fprintf(w, "data flow\n  no sensitive data reached a command that emits it\n\n")
 		return
@@ -121,7 +124,7 @@ func reportFlows(w io.Writer, src string, a *Analyzer) {
 		switch {
 		case f.Unresolved:
 			label = "UNKNOWN DATA"
-		case exposingSlot(f.Slot):
+		case f.Slot.Exposes():
 			label = "EXPOSED"
 		}
 		fmt.Fprintf(w, "      %s: reaches %s\n", label, f.Emits)
@@ -129,9 +132,9 @@ func reportFlows(w io.Writer, src string, a *Analyzer) {
 	}
 }
 
-func hasAuthFinding(a *Analyzer) bool {
+func hasAuthFinding(a *analyze.Analyzer) bool {
 	for _, f := range a.Findings {
-		if f.Slot == SlotAuth && !f.Unresolved {
+		if f.Slot == knowledge.SlotAuth && !f.Unresolved {
 			return true
 		}
 	}
@@ -148,7 +151,7 @@ func truncate(s string, n int) string {
 
 // place renders a span as the source text it covers plus its byte offsets, so
 // every line of the report can be checked against the original command.
-func place(src string, s Span) string {
+func place(src string, s analyze.Span) string {
 	if int(s.End) > len(src) || s.Start > s.End {
 		return fmt.Sprintf("(%s)", s)
 	}

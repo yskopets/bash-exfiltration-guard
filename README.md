@@ -35,7 +35,7 @@ verdict
 ## Usage
 
 ```bash
-go build -o guard .
+go build -o guard ./cmd/guard
 
 ./guard assess '<bash command>'        # human-readable report
 ./guard assess --json '<bash command>' # the same assessment the HTTP API returns
@@ -103,7 +103,7 @@ knowledge base is portable even if the engine is not.
 ## The knowledge base
 
 Everything the tool knows about specific programs lives in
-[`knowledge.yaml`](knowledge.yaml) — which commands produce credentials, which
+[`pkg/knowledge/knowledge.yaml`](pkg/knowledge/knowledge.yaml) — which commands produce credentials, which
 flags take values, and which slot each value lands in. It is embedded in the
 binary by default; `-kb FILE` replaces it wholesale. There is no merging, so
 "which knowledge base produced this verdict" has exactly one answer, and every
@@ -693,21 +693,26 @@ than one that has none.
 
 ## Files
 
-| file | contents |
+| package | contents |
 |---|---|
-| `main.go` | the cobra root command and exit codes |
-| `cmd_assess.go`, `cmd_config.go`, `cmd_serve.go` | one subcommand each |
-| `report.go` | rendering an assessment for a terminal |
-| `api.go` | the wire contract, shared by `--json` and the HTTP API |
-| `server.go` | the HTTP API |
-| `analyze.go` | the AST walk that builds the flow graph |
-| `value.go` | what "data" means: `Flow`, `Step`, `Value` |
-| `knowledge.yaml` | **the knowledge base** — the only program-specific knowledge |
-| `knowledge.go` | slot definitions, the `Spec`/`FlagSpec` types, and lookups |
-| `knowledge_load.go` | loading and validating a knowledge base |
-| `analyze_test.go` | flow traces asserted hop by hop |
-| `knowledge_load_test.go` | one test per way of writing an invalid base |
-| `api_test.go` | the wire contract, and graph convergence |
-| `server_test.go` | endpoints, status codes, concurrency under `-race` |
-| `cmd_test.go` | exit codes, and that a denial prints no usage text |
+| `cmd/guard` | the entry point, and nothing else |
+| `pkg/knowledge` | what slots mean, the `Spec` types, and loading a base from YAML |
+| `pkg/analyze` | the AST walk, the flow graph, and the verdict |
+| `pkg/api` | the wire contract, shared by `--json` and the HTTP API |
+| `pkg/server` | the HTTP API |
+| `pkg/cli` | the cobra commands and the terminal report |
+
+The dependency direction is one way, and the compiler enforces it:
+
+```
+cmd/guard -> cli -> server -> api -> analyze -> knowledge
+```
+
+`analyze` cannot reach into `knowledge`'s internals, which is the architectural
+claim this README makes made checkable: the engine is generic, and everything
+it knows about specific programs arrives through one package's exported types.
+
+| other | |
+|---|---|
 | `probes/` | the parser comparison, reproducible via `run.sh` |
+| `pkg/*/[a-z]*_test.go` | tests live beside the package they exercise |

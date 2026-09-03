@@ -1,18 +1,31 @@
-package main
+package api
 
 import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"guard/pkg/analyze"
+	"guard/pkg/knowledge"
 )
 
 // The wire format is a contract: a UI parses it, so a field that quietly
 // changes shape breaks something downstream. These tests pin the shape, not
 // just the values.
 
+// testKB is the built-in knowledge base, loaded once, so the wire contract is
+// exercised against the base the binary actually ships with.
+var testKB = func() *knowledge.Base {
+	kb, err := knowledge.LoadBuiltin()
+	if err != nil {
+		panic("built-in knowledge base does not load: " + err.Error())
+	}
+	return kb
+}()
+
 func assess(t *testing.T, src string) Assessment {
 	t.Helper()
-	a, err := Analyze(src, testKB)
+	a, err := analyze.Analyze(src, testKB)
 	if err != nil {
 		return UnparsableAssessment(src, testKB, err)
 	}
@@ -48,7 +61,7 @@ func TestAssessmentOfAnIntendedUse(t *testing.T) {
 	if f.Outcome != OutcomeIntendedUse {
 		t.Errorf("outcome = %q, want %q", f.Outcome, OutcomeIntendedUse)
 	}
-	if f.Origin.Kind != string(OriginProducer) || f.Origin.Label != "gh auth token" {
+	if f.Origin.Kind != string(analyze.OriginProducer) || f.Origin.Label != "gh auth token" {
 		t.Errorf("origin = %+v", f.Origin)
 	}
 	if got := stepKinds(f); strings.Join(got, ",") != "command-substitution,sink" {

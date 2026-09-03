@@ -1,4 +1,4 @@
-package main
+package cli
 
 import (
 	"encoding/json"
@@ -8,6 +8,9 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+
+	"guard/pkg/analyze"
+	"guard/pkg/api"
 )
 
 // newAssessCmd builds `guard assess`.
@@ -38,7 +41,7 @@ func newAssessCmd(kbPath *string, exitCode *int) *cobra.Command {
 				return err
 			}
 
-			a, analyzeErr := Analyze(src, kb)
+			a, analyzeErr := analyze.Analyze(src, kb)
 			if analyzeErr != nil {
 				// Not valid shell. The data flow is unknown, and unknown is
 				// never an allow -- but this is a verdict, not misuse, so it
@@ -48,7 +51,7 @@ func newAssessCmd(kbPath *string, exitCode *int) *cobra.Command {
 					return nil
 				}
 				if asJSON {
-					return emitJSON(cmd.OutOrStdout(), UnparsableAssessment(src, kb, analyzeErr))
+					return emitJSON(cmd.OutOrStdout(), api.UnparsableAssessment(src, kb, analyzeErr))
 				}
 				fmt.Fprintf(cmd.ErrOrStderr(),
 					"DENY: cannot parse command, so its data flow is unknown:\n  %v\n", analyzeErr)
@@ -56,14 +59,14 @@ func newAssessCmd(kbPath *string, exitCode *int) *cobra.Command {
 			}
 
 			verdict, reasons := a.Decide()
-			if verdict == Deny {
+			if verdict == analyze.Deny {
 				*exitCode = exitDeny
 			}
 
 			switch {
 			case quiet:
 			case asJSON:
-				return emitJSON(cmd.OutOrStdout(), NewAssessment(src, a, verdict, reasons))
+				return emitJSON(cmd.OutOrStdout(), api.NewAssessment(src, a, verdict, reasons))
 			default:
 				report(cmd.OutOrStdout(), src, a, verdict, reasons)
 			}

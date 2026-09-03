@@ -1,4 +1,4 @@
-package main
+package api
 
 // The wire contract.
 //
@@ -15,6 +15,9 @@ package main
 import (
 	"fmt"
 	"strings"
+
+	"guard/pkg/analyze"
+	"guard/pkg/knowledge"
 )
 
 // Assessment is the response to "should this command run?".
@@ -52,24 +55,24 @@ type Assessment struct {
 }
 
 type CommandView struct {
-	Name          string    `json:"name"`
-	Span          Span      `json:"span"`
-	Known         bool      `json:"known"`
-	Understood    bool      `json:"understood"`
-	Receives      bool      `json:"receives"`
-	Emits         string    `json:"emits,omitempty"`
-	Gaps          []string  `json:"gaps,omitempty"`
-	UntrustedPath string    `json:"untrustedPath,omitempty"`
-	Computed      string    `json:"computed,omitempty"`
-	Args          []ArgView `json:"args,omitempty"`
+	Name          string       `json:"name"`
+	Span          analyze.Span `json:"span"`
+	Known         bool         `json:"known"`
+	Understood    bool         `json:"understood"`
+	Receives      bool         `json:"receives"`
+	Emits         string       `json:"emits,omitempty"`
+	Gaps          []string     `json:"gaps,omitempty"`
+	UntrustedPath string       `json:"untrustedPath,omitempty"`
+	Computed      string       `json:"computed,omitempty"`
+	Args          []ArgView    `json:"args,omitempty"`
 }
 
 type ArgView struct {
-	Text  string `json:"text"`
-	Span  Span   `json:"span"`
-	Role  string `json:"role"`
-	Slot  string `json:"slot,omitempty"`
-	Known bool   `json:"known"`
+	Text  string       `json:"text"`
+	Span  analyze.Span `json:"span"`
+	Role  string       `json:"role"`
+	Slot  string       `json:"slot,omitempty"`
+	Known bool         `json:"known"`
 }
 
 type FlowView struct {
@@ -79,23 +82,23 @@ type FlowView struct {
 }
 
 type OriginView struct {
-	Label string `json:"label"`
-	Kind  string `json:"kind"`
-	Why   string `json:"why"`
-	Span  Span   `json:"span"`
+	Label string       `json:"label"`
+	Kind  string       `json:"kind"`
+	Why   string       `json:"why"`
+	Span  analyze.Span `json:"span"`
 }
 
 type StepView struct {
-	Kind  string `json:"kind"`
-	Label string `json:"label"`
-	Span  Span   `json:"span"`
-	Slot  string `json:"slot,omitempty"`
-	Emits string `json:"emits,omitempty"`
+	Kind  string       `json:"kind"`
+	Label string       `json:"label"`
+	Span  analyze.Span `json:"span"`
+	Slot  string       `json:"slot,omitempty"`
+	Emits string       `json:"emits,omitempty"`
 }
 
 type NoteView struct {
-	Text string `json:"text"`
-	Span Span   `json:"span"`
+	Text string       `json:"text"`
+	Span analyze.Span `json:"span"`
 }
 
 // ------------------------------------------------------------------ graph
@@ -106,12 +109,12 @@ type GraphView struct {
 }
 
 type NodeView struct {
-	ID    string `json:"id"`
-	Kind  string `json:"kind"` // source | variable | transform | sink
-	Label string `json:"label"`
-	Span  Span   `json:"span"`
-	Slot  string `json:"slot,omitempty"`
-	Emits string `json:"emits,omitempty"`
+	ID    string       `json:"id"`
+	Kind  string       `json:"kind"` // source | variable | transform | sink
+	Label string       `json:"label"`
+	Span  analyze.Span `json:"span"`
+	Slot  string       `json:"slot,omitempty"`
+	Emits string       `json:"emits,omitempty"`
 }
 
 type EdgeView struct {
@@ -130,11 +133,11 @@ const (
 // ------------------------------------------------------------- building
 
 // NewAssessment projects a completed analysis onto the wire types.
-func NewAssessment(src string, a *Analyzer, verdict Verdict, reasons []string) Assessment {
+func NewAssessment(src string, a *analyze.Analyzer, verdict analyze.Verdict, reasons []string) Assessment {
 	as := Assessment{
 		Command:       src,
 		Verdict:       string(verdict),
-		KnowledgeBase: a.kb.Source,
+		KnowledgeBase: a.Base().Source,
 		Parsed:        true,
 		Reasons:       reasons,
 		Message:       message(verdict, reasons),
@@ -151,23 +154,23 @@ func NewAssessment(src string, a *Analyzer, verdict Verdict, reasons []string) A
 // UnparsableAssessment is the result for a command that is not valid shell.
 // It is a verdict, not an error: the data flow is unknown, and unknown is
 // never an allow.
-func UnparsableAssessment(src string, kb *KnowledgeBase, err error) Assessment {
+func UnparsableAssessment(src string, kb *knowledge.Base, err error) Assessment {
 	reason := "the command cannot be parsed, so its data flow is unknown: " + err.Error()
 	return Assessment{
 		Command:       src,
-		Verdict:       string(Deny),
+		Verdict:       string(analyze.Deny),
 		KnowledgeBase: kb.Source,
 		Parsed:        false,
 		ParseError:    err.Error(),
 		Reasons:       []string{reason},
-		Message:       message(Deny, []string{reason}),
+		Message:       message(analyze.Deny, []string{reason}),
 		Commands:      []CommandView{},
 		Flows:         []FlowView{},
 		Graph:         GraphView{Nodes: []NodeView{}, Edges: []EdgeView{}},
 	}
 }
 
-func message(verdict Verdict, reasons []string) string {
+func message(verdict analyze.Verdict, reasons []string) string {
 	var b strings.Builder
 	b.WriteString(string(verdict))
 	for _, r := range reasons {
@@ -177,7 +180,7 @@ func message(verdict Verdict, reasons []string) string {
 	return b.String()
 }
 
-func commandViews(a *Analyzer) []CommandView {
+func commandViews(a *analyze.Analyzer) []CommandView {
 	out := make([]CommandView, 0, len(a.Uses))
 	for _, u := range a.Uses {
 		cv := CommandView{
@@ -202,7 +205,7 @@ func commandViews(a *Analyzer) []CommandView {
 	return out
 }
 
-func flowViews(a *Analyzer) []FlowView {
+func flowViews(a *analyze.Analyzer) []FlowView {
 	out := make([]FlowView, 0, len(a.Findings))
 	for _, f := range a.Findings {
 		fv := FlowView{
@@ -228,11 +231,11 @@ func flowViews(a *Analyzer) []FlowView {
 	return out
 }
 
-func outcomeOf(f Finding) string {
+func outcomeOf(f analyze.Finding) string {
 	switch {
 	case f.Unresolved:
 		return OutcomeUnresolved
-	case exposingSlot(f.Slot):
+	case f.Slot.Exposes():
 		return OutcomeExposed
 	}
 	return OutcomeIntendedUse
@@ -250,7 +253,7 @@ func buildGraph(flows []FlowView) GraphView {
 	byKey := map[string]string{} // node key -> node id
 	edgeSeen := map[string]bool{}
 
-	node := func(kind, label string, span Span, slot, emits string) string {
+	node := func(kind, label string, span analyze.Span, slot, emits string) string {
 		key := kind + "\x00" + label
 		if id, ok := byKey[key]; ok {
 			return id
@@ -296,15 +299,15 @@ func buildGraph(flows []FlowView) GraphView {
 // edge. Assignment and expansion both land on the variable, so a value stored
 // and later read collapses to one node rather than two.
 func nodeFor(s StepView) (kind, label string) {
-	switch StepKind(s.Kind) {
-	case StepAssignment, StepExpansion:
+	switch analyze.StepKind(s.Kind) {
+	case analyze.StepAssignment, analyze.StepExpansion:
 		return "variable", variableName(s.Label)
-	case StepSink, StepRedirect:
+	case analyze.StepSink, analyze.StepRedirect:
 		return "sink", sinkLabel(s.Label)
-	case StepPassthrough, StepFileRead, StepPrintsArgs,
-		StepUnknownCommand, StepComputedName, StepProcessSubstitution:
+	case analyze.StepPassthrough, analyze.StepFileRead, analyze.StepPrintsArgs,
+		analyze.StepUnknownCommand, analyze.StepComputedName, analyze.StepProcessSubstitution:
 		return "transform", s.Label
-	case StepCommandSubstitution, StepPipe, StepStdinRedirect, StepHereDocument:
+	case analyze.StepCommandSubstitution, analyze.StepPipe, analyze.StepStdinRedirect, analyze.StepHereDocument:
 		return "", ""
 	}
 	return "transform", s.Label
