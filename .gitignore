@@ -5,3 +5,5 @@ ui/node_modules/
 ui/tsconfig.tsbuildinfo
 pkg/ui/dist/*
 !pkg/ui/dist/.gitkeep
+claude-code-session-transcript.txt
+VIDEO-SCRIPT.md
