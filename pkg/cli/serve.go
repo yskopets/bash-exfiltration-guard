@@ -2,7 +2,9 @@ package cli
 
 import (
 	"context"
+	"io/fs"
 	"log"
+	"os"
 
 	"github.com/spf13/cobra"
 
@@ -11,7 +13,10 @@ import (
 
 // newServeCmd builds `guard serve`.
 func newServeCmd(kbPath *string) *cobra.Command {
-	var addr string
+	var (
+		addr   string
+		uiPath string
+	)
 
 	cmd := &cobra.Command{
 		Use:   "serve",
@@ -30,11 +35,23 @@ func newServeCmd(kbPath *string) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// nil means the assets compiled into the binary.
+			var uiFS fs.FS
+			if uiPath != "" {
+				uiFS = os.DirFS(uiPath)
+			}
+
 			logger := log.New(cmd.ErrOrStderr(), "", log.LstdFlags)
-			return server.NewServer(kb, logger).ListenAndServe(context.Background(), addr)
+			return server.NewServer(kb, uiFS, logger).ListenAndServe(context.Background(), addr)
 		},
 	}
 
 	cmd.Flags().StringVar(&addr, "addr", "127.0.0.1:8080", "address to listen on")
+
+	// Defaults from GUARD_UI for the same reason --kb does from GUARD_KB:
+	// explicit arguments replace a Docker CMD wholesale, so a flag baked into
+	// CMD would apply to the default command and silently not to any other.
+	cmd.Flags().StringVar(&uiPath, "ui", os.Getenv("GUARD_UI"),
+		"directory of built UI assets, instead of the ones in the binary [$GUARD_UI]")
 	return cmd
 }

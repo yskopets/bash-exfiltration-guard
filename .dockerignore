@@ -2,9 +2,12 @@
 .gitignore
 .claude
 guard
+guard-oci.tar
 coverage.out
 *.out
 probes
+test
+ui/node_modules
 README.md
 Makefile
 Dockerfile

@@ -35,13 +35,15 @@ verdict
 ## Usage
 
 ```bash
-make build            # go build -o guard ./cmd/guard
+make ui               # compile the browser interface
+make build            # the binary, with the UI embedded
 make test             # the suite, under the race detector
 make test-integration # smoke-test the built binary end to end
 make test-cover       # statement coverage across all packages
 make test-bench       # time and allocations, see Performance below
 make check            # go vet, and fail on anything unformatted
-make dev.run          # run the HTTP server from source, no build step
+make dev.run          # run the HTTP server from source, UI served from disk
+make dev.ui           # the Vite dev server, hot-reloading against dev.run
 
 ./guard assess '<bash command>'        # human-readable report
 ./guard assess --json '<bash command>' # the same assessment the HTTP API returns
@@ -616,6 +618,61 @@ container loopback is unreachable from outside it, and the network namespace
 is the boundary that loopback provides on a host. It is still unauthenticated
 — do not publish the port anywhere you would not publish a shell.
 
+## The browser UI
+
+```bash
+make ui && make build && ./guard serve
+# then open http://127.0.0.1:8080
+```
+
+A page for exploring the tool: paste a command, see the verdict, and read why.
+Every non-obvious finding in this project came from someone asking "what does
+it say about *this* shape?" — the attached-flag bug, the `curl -v` stderr
+echo, printing to stdout. This makes that loop take five seconds.
+
+It shows the verdict and its reasons, the flows as ordered hops with the slot
+each landed in, the per-command coverage table, and the graph. The graph is
+where the argument this whole tool rests on becomes visible at a glance:
+
+```
+X=$(gh auth token); curl -H "Authorization: Bearer $X" -d "$X" https://api.github.com/x
+
+  gh auth token ──assignment──▶ $X ──sink──▶ curl -H   (auth slot, green)
+                                    └─sink──▶ curl -d   (content slot, red)
+```
+
+One credential, one variable, two sinks — and the slot is the only thing that
+differs between the allowed use and the denied one.
+
+**Stack:** Vite + React + TypeScript, with React Flow for the graph and dagre
+to lay it out. Chosen for where this goes rather than where it is: a
+server-rendered page would fight every future feature, and hand-rolled SVG
+would have to grow pan, zoom and a layout engine. The API already returns a
+deduplicated node/edge graph, so the page renders rather than computes.
+
+### Where the assets come from
+
+| context | source |
+|---|---|
+| a plain binary | embedded |
+| `make dev.run` | `./pkg/ui/dist` |
+| the container | `/srv/guard/ui` |
+
+`guard serve --ui DIR` overrides, defaulting from `GUARD_UI` — the same
+pattern as `--kb`/`GUARD_KB`, and for the same reason. So the container's UI
+can be replaced by mounting over it:
+
+```bash
+docker run --rm -p 8080:8080 -v ./my-ui:/srv/guard/ui:ro guard:dev
+```
+
+**Node is not on the critical path.** `pkg/ui/dist/.gitkeep` is committed, so
+`go build ./cmd/guard` works on a fresh clone with no Node installed — the
+binary just serves a page saying the UI was not built and how to build it,
+rather than a 404. (The Vite build empties that directory, so
+`ui/public/.gitkeep` is copied back in on every build. That is the only reason
+that file exists.)
+
 ## HTTP API
 
 ```bash
@@ -829,7 +886,9 @@ it knows about specific programs arrives through one package's exported types.
 
 | other | |
 |---|---|
-| `Makefile` | build, test, coverage, benchmarks, vet, docker |
+| `ui/` | the browser interface: Vite, React, TypeScript |
+| `pkg/ui/` | embedding and serving the built assets |
+| `Makefile` | build, test, coverage, benchmarks, vet, docker, ui |
 | `Dockerfile` | multi-arch distroless image |
 | `probes/` | the parser comparison, reproducible via `run.sh` |
 | `pkg/*/[a-z]*_test.go` | tests live beside the package they exercise |

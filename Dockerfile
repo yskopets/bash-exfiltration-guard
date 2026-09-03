@@ -1,5 +1,18 @@
 # syntax=docker/dockerfile:1
 
+# --------------------------------------------------------------------- ui
+#
+# Also pinned to the BUILD platform: the output is static files, identical
+# whichever architecture ends up running them, so building it once and copying
+# it into every target is right.
+FROM --platform=$BUILDPLATFORM node:22-alpine AS ui
+
+WORKDIR /ui
+COPY ui/package.json ui/package-lock.json ./
+RUN --mount=type=cache,target=/root/.npm npm ci
+COPY ui/ ./
+RUN npm run build
+
 # ------------------------------------------------------------------ build
 #
 # Pinned to the BUILD platform and cross-compiled from there, so a multi-arch
@@ -37,10 +50,16 @@ COPY --from=build /out/guard /usr/local/bin/guard
 # /api/v1/knowledge naming which one it loaded.
 COPY pkg/knowledge/knowledge.yaml /etc/guard/knowledge.yaml
 
+# The UI ships as files and is served from disk, so it can be replaced by
+# mounting over /srv/guard/ui -- the same story as the knowledge base. The
+# binary embeds a copy too, but GUARD_UI makes the directory authoritative.
+COPY --from=ui /pkg/ui/dist /srv/guard/ui
+
 # Set as an environment default rather than a CMD flag. Explicit arguments
 # replace CMD wholesale, so `docker run guard config check` would otherwise
 # quietly validate the embedded base instead of the mounted one.
-ENV GUARD_KB=/etc/guard/knowledge.yaml
+ENV GUARD_KB=/etc/guard/knowledge.yaml \
+    GUARD_UI=/srv/guard/ui
 
 EXPOSE 8080
 

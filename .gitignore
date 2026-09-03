@@ -1,3 +1,6 @@
 /guard
 coverage.out
 guard-oci.tar
+ui/node_modules/
+pkg/ui/dist/*
+!pkg/ui/dist/.gitkeep

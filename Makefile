@@ -4,6 +4,7 @@
 # either -- `make test` and `make test-bench` only parse and analyze strings.
 
 BINARY := guard
+UIDIR  := pkg/ui/dist
 CMD    := ./cmd/guard
 PKGS   := ./...
 COVER  := coverage.out
@@ -24,14 +25,26 @@ OCI       := guard-oci.tar
 DOCKER_OUTPUT ?= --output=type=oci,dest=$(OCI)
 
 .DEFAULT_GOAL := help
-.PHONY: help build test test-integration test-bench test-cover check clean docker docker-local dev.run
+.PHONY: help ui build test test-integration test-bench test-cover check clean docker docker-local dev.run dev.ui
 
 ## help:       list the targets
 help:
 	@grep -E '^## ' $(MAKEFILE_LIST) | sed 's/^## /  make /'
 
-## build:      compile the binary to ./guard
-build:
+## ui:         compile the browser interface to pkg/ui/dist
+#
+# Writes into the Go package that embeds it, so `make ui && make build`
+# produces a binary with the page inside.
+ui:
+	cd ui && npm ci && npm run build
+
+## build:      compile the binary, with the UI embedded
+#
+# Depends on ui, because "embedded for convenience" is the whole point. For
+# Go-only iteration where the page does not matter, `go build -o guard
+# ./cmd/guard` skips it -- the binary still runs and / explains that the UI
+# was not built.
+build: ui
 	go build -o $(BINARY) $(CMD)
 
 ## test:       run the suite under the race detector
@@ -81,11 +94,21 @@ check:
 # network namespace to be the boundary, so the server should not be reachable
 # from off the machine.
 #
+# Serves the UI from disk rather than from the binary, so `make ui` is enough
+# to see a change -- no relink.
+#
 #   make dev.run
 #   make dev.run ADDR=127.0.0.1:9000
 #   GUARD_KB=./my-knowledge.yaml make dev.run
 dev.run:
-	go run $(CMD) serve --addr $(ADDR)
+	go run $(CMD) serve --addr $(ADDR) --ui ./$(UIDIR)
+
+## dev.ui:     the Vite dev server, hot-reloading against a running guard
+#
+# Run `make dev.run` in another terminal first: Vite proxies /api to it, so
+# the page reloads on every edit while talking to a real analyzer.
+dev.ui:
+	cd ui && npm run dev
 
 ## docker:     build the multi-arch distroless image
 #
@@ -115,3 +138,4 @@ docker-local:
 ## clean:      remove build and coverage artifacts
 clean:
 	rm -f $(BINARY) $(COVER) $(OCI)
+	find $(UIDIR) -mindepth 1 ! -name .gitkeep -delete

@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"net"
 	"net/http"
@@ -29,6 +30,7 @@ import (
 	"guard/pkg/analyze"
 	"guard/pkg/api"
 	"guard/pkg/knowledge"
+	"guard/pkg/ui"
 )
 
 // maxBodyBytes caps a request. The largest command in a corpus of 172,661
@@ -44,14 +46,23 @@ const maxBodyBytes = 1 << 20
 // assumed.
 type Server struct {
 	kb  *knowledge.Base
+	ui  fs.FS
 	log *log.Logger
 }
 
-func NewServer(kb *knowledge.Base, logger *log.Logger) *Server {
+// NewServer builds a server.
+//
+// uiFS is where the browser interface is served from: a directory when the
+// caller passed --ui or GUARD_UI, and the assets compiled into the binary
+// when it is nil.
+func NewServer(kb *knowledge.Base, uiFS fs.FS, logger *log.Logger) *Server {
 	if logger == nil {
 		logger = log.New(io.Discard, "", 0)
 	}
-	return &Server{kb: kb, log: logger}
+	if uiFS == nil {
+		uiFS = ui.Embedded()
+	}
+	return &Server{kb: kb, ui: uiFS, log: logger}
 }
 
 // Routes are under /api/v1: /api names the machine-readable surface, leaving
@@ -68,6 +79,11 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc(apiPrefix+"/assess", s.handleAssess)
 	mux.HandleFunc(apiPrefix+"/knowledge", s.handleKnowledge)
+
+	// "/" is the catch-all pattern, and ServeMux prefers the more specific
+	// one, so the API routes above still win over the page.
+	mux.Handle("/", ui.Handler(s.ui))
+
 	return s.recoverPanics(s.logRequests(mux))
 }
 

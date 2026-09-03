@@ -315,6 +315,29 @@ func TestServe(t *testing.T) {
 		}
 	})
 
+	t.Run("ui", func(t *testing.T) {
+		resp, err := http.Get("http://" + addr + "/")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("GET / = %d, want 200", resp.StatusCode)
+		}
+		if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+			t.Errorf("Content-Type = %q, want HTML", ct)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		// Either the built page or the "not built" placeholder, depending on
+		// whether `make ui` ran before this. Both are HTML with a title, and
+		// neither is a 404 -- which is the property worth asserting here.
+		if !strings.Contains(string(body), "<title>") &&
+			!strings.Contains(string(body), "id=\"root\"") &&
+			!strings.Contains(string(body), "id=root") {
+			t.Errorf("/ served neither a page nor the not-built notice:\n%s", body)
+		}
+	})
+
 	t.Run("bad request", func(t *testing.T) {
 		resp, err := http.Post("http://"+addr+"/api/v1/assess", "application/json",
 			strings.NewReader(`{}`))
