@@ -8,8 +8,22 @@ CMD    := ./cmd/guard
 PKGS   := ./...
 COVER  := coverage.out
 
+IMAGE     ?= guard
+TAG       ?= dev
+PLATFORMS ?= linux/amd64,linux/arm64
+BUILDER   ?= guard-builder
+OCI       := guard-oci.tar
+
+# Where a multi-arch build puts its result.
+#
+# A manifest list cannot go into the classic docker image store -- `--load`
+# fails with "docker exporter does not currently support exporting manifest
+# lists" -- so the default writes an OCI archive, which works with no registry
+# and no containerd image store. Set DOCKER_OUTPUT=--push to publish instead.
+DOCKER_OUTPUT ?= --output=type=oci,dest=$(OCI)
+
 .DEFAULT_GOAL := help
-.PHONY: help build test test-bench test-cover check clean
+.PHONY: help build test test-bench test-cover check clean docker docker-local
 
 ## help:       list the targets
 help:
@@ -50,6 +64,31 @@ check:
 	go vet $(PKGS)
 	@test -z "$$(gofmt -l . )" || { echo "unformatted:"; gofmt -l .; exit 1; }
 
+## docker:     build the multi-arch distroless image
+#
+# The default docker driver cannot build more than one platform, so this uses
+# a docker-container builder, created on first use. The build cross-compiles
+# from the build platform rather than emulating the target, so two
+# architectures cost roughly one architecture's time.
+#
+#   make docker                             -> ./guard-oci.tar
+#   make docker DOCKER_OUTPUT=--push \
+#        IMAGE=ghcr.io/you/guard TAG=v1     -> pushed to a registry
+docker:
+	@docker buildx inspect $(BUILDER) >/dev/null 2>&1 || \
+	  docker buildx create --name $(BUILDER) --driver docker-container >/dev/null
+	docker buildx build --builder $(BUILDER) --platform $(PLATFORMS) \
+	  -t $(IMAGE):$(TAG) $(DOCKER_OUTPUT) .
+
+## docker-local: build for this machine only, loaded and ready to run
+#
+# What you want while developing: a manifest list is not runnable locally, a
+# single-platform image is.
+#
+#   make docker-local && docker run --rm -p 8080:8080 $(IMAGE):$(TAG)
+docker-local:
+	docker buildx build -t $(IMAGE):$(TAG) --load .
+
 ## clean:      remove build and coverage artifacts
 clean:
-	rm -f $(BINARY) $(COVER)
+	rm -f $(BINARY) $(COVER) $(OCI)

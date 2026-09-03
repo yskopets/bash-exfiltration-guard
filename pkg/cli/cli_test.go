@@ -122,3 +122,21 @@ func TestUnloadableKnowledgeBaseIsUsageError(t *testing.T) {
 		}
 	}
 }
+
+// A container image cannot bake --kb into CMD, because explicit arguments
+// replace CMD wholesale -- `docker run guard config check` would then use the
+// embedded base rather than the mounted one. GUARD_KB applies to every
+// subcommand, and an explicit flag still wins.
+func TestKnowledgeBaseFromTheEnvironment(t *testing.T) {
+	t.Setenv("GUARD_KB", "/nonexistent/from-env.yaml")
+
+	_, _, stderr := runCLI(t, "", "config", "check")
+	if !strings.Contains(stderr, "from-env.yaml") {
+		t.Errorf("GUARD_KB was ignored: %s", stderr)
+	}
+
+	_, _, stderr = runCLI(t, "", "--kb", "/nonexistent/from-flag.yaml", "config", "check")
+	if !strings.Contains(stderr, "from-flag.yaml") {
+		t.Errorf("--kb did not override GUARD_KB: %s", stderr)
+	}
+}

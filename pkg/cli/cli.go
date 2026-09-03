@@ -73,8 +73,13 @@ func newRootCmd() (*cobra.Command, *int) {
 
 	// --kb is persistent because every subcommand needs a knowledge base:
 	// assess and serve to decide with, config check to validate.
-	root.PersistentFlags().StringVar(&kbPath, "kb", "",
-		"knowledge base to use instead of the built-in one")
+	//
+	// It defaults from GUARD_KB so that a container image can point every
+	// subcommand at a mounted base. Explicit arguments replace a Docker CMD
+	// wholesale, so a flag baked into CMD would apply to the default command
+	// and silently not to `docker run guard config check`.
+	root.PersistentFlags().StringVar(&kbPath, "kb", os.Getenv("GUARD_KB"),
+		"knowledge base to use instead of the built-in one [$GUARD_KB]")
 
 	code := exitAllow
 	root.AddCommand(

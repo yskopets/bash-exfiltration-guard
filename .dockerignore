@@ -1,0 +1,11 @@
+.git
+.gitignore
+.claude
+guard
+coverage.out
+*.out
+probes
+README.md
+Makefile
+Dockerfile
+.dockerignore
