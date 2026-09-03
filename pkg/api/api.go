@@ -55,16 +55,19 @@ type Assessment struct {
 }
 
 type CommandView struct {
-	Name          string       `json:"name"`
-	Span          analyze.Span `json:"span"`
-	Known         bool         `json:"known"`
-	Understood    bool         `json:"understood"`
-	Receives      bool         `json:"receives"`
-	Emits         string       `json:"emits,omitempty"`
-	Gaps          []string     `json:"gaps,omitempty"`
-	UntrustedPath string       `json:"untrustedPath,omitempty"`
-	Computed      string       `json:"computed,omitempty"`
-	Args          []ArgView    `json:"args,omitempty"`
+	Name       string       `json:"name"`
+	Span       analyze.Span `json:"span"`
+	Known      bool         `json:"known"`
+	Understood bool         `json:"understood"`
+	// Receives and Produces are independent: sensitive data entering the
+	// command, and the command's own output carrying sensitive data onward.
+	Receives      bool      `json:"receives"`
+	Produces      bool      `json:"produces"`
+	Emits         string    `json:"emits,omitempty"`
+	Gaps          []string  `json:"gaps,omitempty"`
+	UntrustedPath string    `json:"untrustedPath,omitempty"`
+	Computed      string    `json:"computed,omitempty"`
+	Args          []ArgView `json:"args,omitempty"`
 }
 
 type ArgView struct {
@@ -189,6 +192,7 @@ func commandViews(a *analyze.Analyzer) []CommandView {
 			Known:         u.Known,
 			Understood:    u.Understood(),
 			Receives:      u.Receives,
+			Produces:      u.Produces,
 			Emits:         u.Emits,
 			Gaps:          u.Gaps,
 			UntrustedPath: u.UntrustedPath,

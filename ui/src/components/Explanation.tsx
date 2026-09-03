@@ -56,14 +56,17 @@ export function Explanation({ assessment }: { assessment: Assessment }) {
       <p className="muted">
         Two of the three deny rules turn on whether the knowledge base accounted for
         every part of a command, so what it did and did not recognise travels with the
-        verdict.
+        verdict. Input and output are separate because they are independent:{' '}
+        <code>gh auth token</code> produces a credential without receiving one, and{' '}
+        <code>curl -d "$TOKEN"</code> receives one without producing any.
       </p>
       <table className="coverage">
         <thead>
           <tr>
             <th>command</th>
             <th>coverage</th>
-            <th>data</th>
+            <th>input</th>
+            <th>output</th>
           </tr>
         </thead>
         <tbody>
@@ -85,9 +88,20 @@ export function Explanation({ assessment }: { assessment: Assessment }) {
                   <span className="ok">fully understood</span>
                 )}
               </td>
-              <td className="muted">
-                {c.receives ? 'receives sensitive data' : 'nothing sensitive enters'}
-                {c.emits ? `, emits to ${c.emits}` : ''}
+              <td>
+                {c.receives ? (
+                  <span className="sensitive">sensitive</span>
+                ) : (
+                  <span className="muted">—</span>
+                )}
+              </td>
+              <td>
+                {c.produces ? (
+                  <span className="sensitive">sensitive</span>
+                ) : (
+                  <span className="muted">—</span>
+                )}
+                {c.emits && <span className="emits">→ {c.emits}</span>}
               </td>
             </tr>
           ))}

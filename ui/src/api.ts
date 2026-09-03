@@ -45,7 +45,10 @@ export type CommandView = {
   span: Span
   known: boolean
   understood: boolean
+  /** Sensitive data enters this command. */
   receives: boolean
+  /** This command's own output carries sensitive data onward. */
+  produces: boolean
   emits?: string
   gaps?: string[]
   untrustedPath?: string

@@ -52,13 +52,23 @@ type ArgUse struct {
 // matters whether every part of the command it passed through was accounted
 // for: an unmodelled flag could route that data somewhere never inspected.
 type CommandUse struct {
-	Name     string   `json:"name"`
-	Span     Span     `json:"span"`
-	Known    bool     `json:"known"`
-	Args     []ArgUse `json:"args,omitempty"`
-	Gaps     []string `json:"gaps,omitempty"`
-	Receives bool     `json:"receives"`
-	Emits    string   `json:"emits,omitempty"`
+	Name  string   `json:"name"`
+	Span  Span     `json:"span"`
+	Known bool     `json:"known"`
+	Args  []ArgUse `json:"args,omitempty"`
+	Gaps  []string `json:"gaps,omitempty"`
+	// Receives is set when sensitive data enters the command, through an
+	// argument or through stdin. Produces is set when the command's own
+	// output carries sensitive data onward.
+	//
+	// They are independent, and saying so is the point: `gh auth token`
+	// produces without receiving, `curl -d "$TOKEN" https://x` receives
+	// without producing, and `cat ~/.aws/credentials` does both. One
+	// combined field could not tell the first case from the last.
+	Receives bool `json:"receives"`
+	Produces bool `json:"produces"`
+
+	Emits string `json:"emits,omitempty"`
 
 	// Computed names the expansion that produced the program name, when the
 	// name was not written out literally. Such a command is refused outright:
@@ -511,6 +521,12 @@ func (a *Analyzer) call(c *syntax.CallExpr, stdin Value) Value {
 	}
 
 	scan := bindArgs(a, spec, args, values)
+
+	// The output has to be computed before the coverage record, because the
+	// record reports whether it carries anything. commandOutput records no
+	// findings, so nothing observable moves by doing it in this order.
+	out := a.commandOutput(spec, c, args, values, stdin)
+
 	use := CommandUse{
 		Name:     fullName,
 		Span:     a.span(c),
@@ -518,6 +534,7 @@ func (a *Analyzer) call(c *syntax.CallExpr, stdin Value) Value {
 		Args:     scan.uses,
 		Gaps:     scan.gaps,
 		Receives: receives(values, stdin),
+		Produces: len(out.Flows) > 0,
 		Emits:    spec.Emits,
 	}
 	if !trusted {
@@ -525,7 +542,6 @@ func (a *Analyzer) call(c *syntax.CallExpr, stdin Value) Value {
 	}
 	a.Uses = append(a.Uses, use)
 
-	out := a.commandOutput(spec, c, args, values, stdin)
 	a.recordSinks(spec, fullName, c, args, values, stdin, scan)
 	return out
 }
@@ -713,6 +729,7 @@ func (a *Analyzer) computedName(c *syntax.CallExpr, computed string, stdin Value
 		Known:    false,
 		Computed: computed,
 		Receives: !in.empty(),
+		Produces: len(in.Flows) > 0,
 	})
 
 	out := in.then(StepComputedName, "passed through a command named by "+computed, a.span(c))
@@ -741,6 +758,9 @@ func (a *Analyzer) unknownCommand(c *syntax.CallExpr, bin, path string, trusted 
 		Span:     a.span(c),
 		Known:    false,
 		Receives: !in.empty(),
+		// Whatever an unknown program was handed is assumed to come back
+		// out of it; that assumption is what unknownCommand exists to make.
+		Produces: len(in.Flows) > 0,
 	}
 	if !trusted {
 		use.UntrustedPath = path

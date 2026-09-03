@@ -197,6 +197,15 @@ func TestAssessmentCarriesCoverage(t *testing.T) {
 	if !curl.Receives {
 		t.Errorf("curl should be recorded as receiving sensitive data")
 	}
+	if curl.Produces {
+		t.Errorf("curl's own output does not carry the credential onward")
+	}
+
+	// The producing end of the same distinction.
+	as = assess(t, `gh auth token`)
+	if len(as.Commands) != 1 || as.Commands[0].Receives || !as.Commands[0].Produces {
+		t.Errorf("gh auth token = %+v; want receives=false produces=true", as.Commands)
+	}
 }
 
 func nodeKinds(g GraphView) []string {

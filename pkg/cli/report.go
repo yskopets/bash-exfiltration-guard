@@ -94,17 +94,27 @@ func coverageLabel(u analyze.CommandUse) string {
 	return "fully understood"
 }
 
+// dataLabel says what sensitive data enters a command and what leaves it.
+//
+// The two are independent. `gh auth token` produces without receiving,
+// `curl -d "$TOKEN" https://x` receives without producing, and `cat
+// ~/.aws/credentials` does both -- so a single "does it touch anything
+// sensitive" line would flatten the case that matters most.
 func dataLabel(u analyze.CommandUse) string {
-	parts := []string{}
+	in := "no sensitive input"
 	if u.Receives {
-		parts = append(parts, "receives sensitive data")
-	} else {
-		parts = append(parts, "no sensitive data enters here")
+		in = "sensitive input"
+	}
+
+	out := "no sensitive output"
+	if u.Produces {
+		out = "sensitive output"
 	}
 	if u.Emits != "" {
-		parts = append(parts, "emits to "+u.Emits)
+		out += ", emits to " + u.Emits
 	}
-	return strings.Join(parts, ", ")
+
+	return in + "; " + out
 }
 
 func reportFlows(w io.Writer, src string, a *analyze.Analyzer) {
