@@ -107,12 +107,15 @@ func coverageLabel(u analyze.CommandUse) string {
 // printed next to NOT IN KNOWLEDGE BASE it reads as "we have no idea what
 // this is, and also it is fine".
 func dataLabel(u analyze.CommandUse) string {
+	// For a command nobody modelled, "unknown" is the honest answer only where
+	// nothing is known. Whatever such a command was handed is assumed to come
+	// back out of it, so once it receives sensitive data its output carries
+	// sensitive data too -- that is a conclusion, not an absence of one.
 	if !u.Known {
-		in := "unknown input"
 		if u.Receives {
-			in = "sensitive input"
+			return "sensitive input; sensitive output"
 		}
-		return in + "; unknown output"
+		return "unknown input; unknown output"
 	}
 
 	in := "no sensitive input"

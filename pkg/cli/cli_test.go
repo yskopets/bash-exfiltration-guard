@@ -161,4 +161,13 @@ func TestUnknownCommandsReportUnknownRatherThanNone(t *testing.T) {
 	if !strings.Contains(stdout, "no sensitive input; no sensitive output") {
 		t.Errorf("a known, clean command should not say unknown:\n%s", stdout)
 	}
+
+	// But an unknown command that DOES carry taint is not unknown in either
+	// direction: whatever it was handed is assumed to come back out, which is
+	// a conclusion rather than an absence of one. The terminal must agree with
+	// the API's receives/produces here, not report "unknown output".
+	_, stdout, _ = runCLI(t, "", "assess", `echo "$GH_TOKEN" | mystery-tool`)
+	if !strings.Contains(stdout, "sensitive input; sensitive output") {
+		t.Errorf("an unknown command carrying taint should report it:\n%s", stdout)
+	}
 }
