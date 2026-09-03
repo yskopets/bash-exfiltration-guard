@@ -1,6 +1,12 @@
 # Bash exfiltration guard
 
-A prototype static data flow analyzer for Bash commands.
+A static data flow analyzer for Bash commands.
+
+## Theme
+
+Theme 3: Systems & Reliability
+
+A developer tool that solves a real workflow pain point.
 
 ## Motivation
 
@@ -133,12 +139,24 @@ via either the UI or the API.
 
 ## Time breakdown
 
-* `~3h` on the prototype of the data flow analyzer
-* extra time on UI for the demo
-* extra time on presentation
+`8h` in total:
+
+* `3h` on the prototype of the data flow analyzer
+* `2h` on UI for the demo
+* `3h` on demo deployment and presentation
 
 ## Use of Claude Code
 
 * to extract Bash commands out of real Claude Code sessions in CI environment and compile a test dataset
 * to develop the prototype
+* to compile the knowledge base of commands
 * to develop UI for the demo
+* to deploy a demo instance
+
+## How I would extend the prototype with more time
+
+* grow the knowledge base of commands
+* grow the Bash grammar coverage
+* integrate shell script linter into the analyzer (as one of the checks)
+* integrate into Claude Code as a `PreToolUse` hook (see above)
+* integrate into Claude Code as a LLM gateway pre-processing the classification requests (see above)
